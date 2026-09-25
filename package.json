@@ -1,0 +1,14 @@
+{
+  "name": "jev-fight-coach",
+  "version": "1.0.0",
+  "description": "Real-time AI fight coach reading tells and calling counter cues",
+  "type": "module",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node backend/server.js"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
+    "@typesafe-ai/sdk": "^0.6.0"
+  }
+}

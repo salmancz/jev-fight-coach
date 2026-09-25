@@ -1,0 +1,21 @@
+{
+  "name": "jev-fight-coach-backend",
+  "version": "1.0.0",
+  "description": "Proxy server for Jev Fight Coach — holds the Jev API key server-side, calls TypeSafe AI, returns structured cue decisions.",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
+    "@typesafe-ai/sdk": "^0.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

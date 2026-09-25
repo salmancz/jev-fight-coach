@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Jev Fight Coach</title>
+  <meta name="description" content="Real-time fight coaching app — reads opponent tells and calls cues in your ear via Jev AI." />
+  <meta name="theme-color" content="#080808" />
+
+  <!-- Google Fonts: Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="style.css" />
+
+  <!--
+    MediaPipe Tasks Vision — ES module via importmap.
+    Pin to a specific version to avoid unexpected CDN updates during filming.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "mediapipe/tasks-vision": "/mediapipe/vision_bundle.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Navigation pill ────────────────────────────────────────────────── -->
+  <nav id="nav" class="reveal">
+    <div id="nav-logo">
+      <!-- Fist icon (inline SVG — no icon library dependency) -->
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 11V7a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/>
+        <path d="M14 10V5a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/>
+        <path d="M10 9V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v10"/>
+        <path d="M18 11a2 2 0 1 1 4 0v3a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
+      </svg>
+      Jev Fight Coach
+    </div>
+
+    <div id="nav-status">
+      <div class="status-dot" id="status-dot" aria-label="System status"></div>
+      <span id="status-text">Ready</span>
+    </div>
+  </nav>
+
+  <!-- ── Main content grid ──────────────────────────────────────────────── -->
+  <main id="main">
+
+    <!-- Camera + pose overlay panel -->
+    <section id="camera-shell" class="reveal">
+      <div id="camera-core">
+
+        <!-- Idle / loading state -->
+        <div id="camera-idle">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+            <circle cx="12" cy="13" r="4"/>
+          </svg>
+          <span id="idle-label">Camera will open when you press Start</span>
+        </div>
+
+        <!-- Camera video element -->
+        <video id="video" autoplay playsinline muted
+               aria-label="Live camera feed of sparring partner">
+        </video>
+
+        <!-- MediaPipe pose skeleton overlay canvas -->
+        <canvas id="pose-overlay" aria-hidden="true"></canvas>
+
+        <!-- Active cue overlay (appears on camera feed) -->
+        <div id="live-cue-overlay" aria-live="assertive" aria-atomic="true">
+          <div id="live-cue-text"></div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── Sidebar ────────────────────────────────────────────────────── -->
+    <aside id="sidebar">
+
+      <!-- Current cue card -->
+      <div class="card reveal" id="cue-card">
+        <p class="card-title">Current Cue</p>
+        <div id="cue-display">—</div>
+        <div id="cue-subtext">Waiting for camera…</div>
+
+        <div id="confidence-bar-wrap">
+          <div class="conf-label">
+            <span>Confidence</span>
+            <span id="conf-pct">—</span>
+          </div>
+          <div id="confidence-track">
+            <div id="confidence-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls card -->
+      <div class="card reveal" id="controls-card">
+        <p class="card-title">Controls</p>
+
+        <div id="controls">
+          <button id="btn-toggle" type="button" aria-pressed="false">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"
+                 aria-hidden="true" id="btn-icon">
+              <!-- Play triangle — replaced with stop square when running -->
+              <polygon points="5,3 19,12 5,21"/>
+            </svg>
+            <span id="btn-label">Start</span>
+          </button>
+        </div>
+
+        <!-- Backend URL -->
+        <div class="setting-group" style="margin-top:0.85rem;">
+          <label class="setting-label" for="input-backend">Backend URL</label>
+          <input id="input-backend" type="url"
+                 placeholder="http://192.168.1.x:3001"
+                 value="http://localhost:3001"
+                 autocomplete="off" spellcheck="false" />
+        </div>
+
+        <!-- Settings row: confidence floor + model selector -->
+        <div id="settings-row" style="margin-top:0.75rem;">
+          <div class="setting-group">
+            <label class="setting-label" for="slider-confidence">
+              Confidence floor: <span id="conf-floor-val">0.58</span>
+            </label>
+            <input id="slider-confidence" type="range"
+                   min="0.3" max="0.9" step="0.02" value="0.58" />
+          </div>
+
+          <div class="setting-group">
+            <label class="setting-label" for="slider-window">
+              Window (ms): <span id="window-val">180</span>
+            </label>
+            <input id="slider-window" type="range"
+                   min="100" max="400" step="10" value="180" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Audio & Sound Check card -->
+      <div class="card reveal" id="audio-test-card">
+        <p class="card-title">Audio & Sound Check</p>
+        <p style="font-size:0.75rem; color:var(--text-muted); margin-bottom: 0.6rem;">
+          Click any cue to test voice playback in your headset/speakers:
+        </p>
+        <div style="display:flex; flex-wrap:wrap; gap:0.45rem;">
+          <button type="button" class="btn-cue-test" data-cue="jab_loading">🔊 Slip Left</button>
+          <button type="button" class="btn-cue-test" data-cue="right_hand_loading">🔊 Duck Right</button>
+          <button type="button" class="btn-cue-test" data-cue="guard_dropping">🔊 Guard Up</button>
+          <button type="button" class="btn-cue-test" data-cue="overextended">🔊 Counter Now</button>
+          <button type="button" class="btn-cue-test" data-cue="closing_distance">🔊 Distance</button>
+          <button type="button" class="btn-cue-test" data-cue="fatigue_low_guard">🔊 Hands Up</button>
+        </div>
+      </div>
+
+      <!-- Cue log card -->
+      <div class="card reveal" id="log-card">
+        <p class="card-title">Cue Log</p>
+        <ul id="log-list" aria-label="Recent coaching cues" aria-live="polite"></ul>
+        <p id="log-empty" style="font-size:0.75rem;color:var(--text-muted);">
+          No cues fired yet.
+        </p>
+      </div>
+
+      <!-- Live snapshot debug card -->
+      <div class="card reveal" id="snapshot-card">
+        <p class="card-title">Pose Snapshot</p>
+        <div id="snapshot-grid">
+          <div class="snap-field">
+            <span class="snap-key">Guard height</span>
+            <span class="snap-val" id="s-guard-height">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Lead velocity</span>
+            <span class="snap-val" id="s-lead-vel">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Rear pullback</span>
+            <span class="snap-val" id="s-pullback">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Hip rotation</span>
+            <span class="snap-val" id="s-hip-rot">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Stance</span>
+            <span class="snap-val" id="s-stance">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Weight shift</span>
+            <span class="snap-val" id="s-weight">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Arm extension</span>
+            <span class="snap-val" id="s-arm-ext">—</span>
+          </div>
+          <div class="snap-field">
+            <span class="snap-key">Low guard (ms)</span>
+            <span class="snap-val" id="s-low-guard">0</span>
+          </div>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- ── Footer ─────────────────────────────────────────────────────────── -->
+  <footer id="footer">
+    Jev Fight Coach — reads tells, not punches
+  </footer>
+
+</div><!-- /#app -->
+
+<!--
+  Main application script — ES module.
+  Wires pose.js + features.js + coach.js together.
+-->
+<script type="module">
+  import { initPose, stopPose }   from './pose.js';
+  import { pushFrame, resetFeatures } from './features.js';
+  import { initCoach, feedSnapshot, stopCoach, CONFIG, unlockAllAudio, playCue } from './coach.js';
+
+  // ── DOM refs ──────────────────────────────────────────────────────────────
+  const videoEl      = document.getElementById('video');
+  const overlayEl    = document.getElementById('pose-overlay');
+  const cameraIdle   = document.getElementById('camera-idle');
+  const idleLabel    = document.getElementById('idle-label');
+  const btnToggle    = document.getElementById('btn-toggle');
+  const btnLabel     = document.getElementById('btn-label');
+  const btnIcon      = document.getElementById('btn-icon');
+  const statusDot    = document.getElementById('status-dot');
+  const statusText   = document.getElementById('status-text');
+  const cueDisplay   = document.getElementById('cue-display');
+  const cueSubtext   = document.getElementById('cue-subtext');
+  const cueCard      = document.getElementById('cue-card');
+  const confFill     = document.getElementById('confidence-fill');
+  const confPct      = document.getElementById('conf-pct');
+  const liveCueOvl   = document.getElementById('live-cue-overlay');
+  const liveCueTxt   = document.getElementById('live-cue-text');
+  const logList      = document.getElementById('log-list');
+  const logEmpty     = document.getElementById('log-empty');
+  const inputBackend = document.getElementById('input-backend');
+  if (window.location.origin && window.location.origin.startsWith('http')) {
+    inputBackend.value = window.location.origin;
+  }
+  const sliderConf   = document.getElementById('slider-confidence');
+  const confFloorVal = document.getElementById('conf-floor-val');
+  const sliderWindow = document.getElementById('slider-window');
+  const windowVal    = document.getElementById('window-val');
+
+  // Snapshot debug fields
+  const snapFields = {
+    guard_height:                    document.getElementById('s-guard-height'),
+    lead_hand_velocity_toward_camera: document.getElementById('s-lead-vel'),
+    rear_hand_pullback:              document.getElementById('s-pullback'),
+    hip_rotation_deg:                document.getElementById('s-hip-rot'),
+    stance:                          document.getElementById('s-stance'),
+    weight_shift:                    document.getElementById('s-weight'),
+    arm_extension:                   document.getElementById('s-arm-ext'),
+    sustained_low_guard_ms:          document.getElementById('s-low-guard'),
+  };
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let running       = false;
+  let cueFlashTimer = null;
+
+  // ── Reveal animations (IntersectionObserver) ──────────────────────────────
+  const observer = new IntersectionObserver(
+    (entries) => entries.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add('in-view'); observer.unobserve(e.target); }
+    }),
+    { threshold: 0.1 },
+  );
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+  // ── Settings sliders ──────────────────────────────────────────────────────
+  sliderConf.addEventListener('input', () => {
+    const v = parseFloat(sliderConf.value);
+    confFloorVal.textContent = v.toFixed(2);
+    CONFIG.CONFIDENCE_FLOOR = v;
+  });
+
+  sliderWindow.addEventListener('input', () => {
+    const v = parseInt(sliderWindow.value, 10);
+    windowVal.textContent = v;
+    CONFIG.WINDOW_MS = v;
+  });
+
+  // ── Start / Stop ──────────────────────────────────────────────────────────
+  btnToggle.addEventListener('click', async () => {
+    if (running) {
+      stopSession();
+    } else {
+      await startSession();
+    }
+  });
+
+  async function startSession() {
+    const backendUrl = inputBackend.value.trim().replace(/\/$/, '');
+    if (!backendUrl) {
+      idleLabel.textContent = 'Please enter the backend URL first.';
+      return;
+    }
+
+    btnToggle.disabled = true;
+    btnLabel.textContent = 'Starting…';
+    setStatus('connecting', 'Connecting…');
+
+    try {
+      // Unlock audio playback (requires user gesture)
+      unlockAudio();
+
+      initCoach({
+        backendUrl,
+        onCue:   handleCue,
+        onError: (msg) => console.warn('[app]', msg),
+      });
+
+      await initPose(videoEl, overlayEl, onLandmarks);
+
+      cameraIdle.style.display = 'none';
+      videoEl.style.display    = 'block';
+
+      running = true;
+      btnToggle.disabled  = false;
+      btnToggle.classList.add('running');
+      btnToggle.setAttribute('aria-pressed', 'true');
+      btnLabel.textContent = 'Stop';
+      btnIcon.innerHTML    = '<rect x="6" y="6" width="12" height="12" rx="1"/>';
+
+      setStatus('live', 'Live');
+
+    } catch (err) {
+      console.error('[app] Start failed:', err);
+      idleLabel.textContent = `Error: ${err.message}`;
+      btnToggle.disabled    = false;
+      btnLabel.textContent  = 'Start';
+      setStatus('idle', 'Error');
+    }
+  }
+
+  function stopSession() {
+    stopPose(videoEl);
+    stopCoach();
+    resetFeatures();
+
+    running = false;
+    videoEl.style.display     = 'none';
+    cameraIdle.style.display  = 'flex';
+    idleLabel.textContent     = 'Camera will open when you press Start';
+
+    btnToggle.classList.remove('running');
+    btnToggle.setAttribute('aria-pressed', 'false');
+    btnLabel.textContent = 'Start';
+    btnIcon.innerHTML    = '<polygon points="5,3 19,12 5,21"/>';
+
+    setStatus('idle', 'Stopped');
+    cueDisplay.textContent   = '—';
+    cueSubtext.textContent   = 'Session ended';
+    liveCueOvl.classList.remove('visible');
+  }
+
+  // ── MediaPipe landmark callback ───────────────────────────────────────────
+  function onLandmarks(landmarks, timestampMs) {
+    const snapshot = pushFrame(landmarks, timestampMs);
+    if (snapshot) {
+      updateSnapshotUI(snapshot);
+      feedSnapshot(snapshot);
+    }
+  }
+
+  // ── Cue handler ───────────────────────────────────────────────────────────
+  const CUE_LABELS = {
+    guard_dropping:    'Guard Up',
+    jab_loading:       'Jab',
+    right_hand_loading:'Right Hand — Duck',
+    stance_switch:     'Southpaw',
+    closing_distance:  'Distance',
+    overextended:      'Counter Now',
+    fatigue_low_guard: 'Hands Up',
+    all_clear:         'Clear',
+  };
+
+  function handleCue(cue, confidence) {
+    const label = CUE_LABELS[cue] ?? cue;
+    const pct   = Math.round(confidence * 100);
+    const isAlert = cue !== 'all_clear';
+
+    // Main cue display
+    cueDisplay.textContent = label;
+    cueDisplay.className   = isAlert ? 'alert' : 'clear';
+    cueCard.className      = `card${isAlert ? ' alert' : ' clear'}`;
+    cueSubtext.textContent = isAlert
+      ? `Confidence: ${pct}%`
+      : 'No active tells detected';
+
+    // Confidence bar
+    confPct.textContent = `${pct}%`;
+    confFill.style.width = `${pct}%`;
+    confFill.className = pct >= 75 ? 'high' : pct >= 58 ? 'mid' : 'low';
+
+    // Camera overlay flash
+    if (isAlert) {
+      liveCueTxt.textContent = label;
+      liveCueOvl.classList.add('visible');
+      clearTimeout(cueFlashTimer);
+      cueFlashTimer = setTimeout(() => liveCueOvl.classList.remove('visible'), 1200);
+    }
+
+    // Log entry
+    if (isAlert) appendLog(label, pct);
+
+    // Status dot
+    statusDot.className = `status-dot ${isAlert ? 'live' : 'clear'}`;
+  }
+
+  // ── Cue log ───────────────────────────────────────────────────────────────
+  const MAX_LOG = 8;
+
+  function appendLog(label, pct) {
+    logEmpty.style.display = 'none';
+
+    const li = document.createElement('li');
+    li.className = 'log-entry';
+
+    const now = new Date();
+    const ts  = `${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+
+    li.innerHTML = `
+      <span class="log-cue">${label}</span>
+      <span class="log-conf">${pct}%</span>
+      <span class="log-time">${ts}</span>
+    `;
+
+    logList.prepend(li);
+
+    // Trim log to MAX_LOG entries
+    while (logList.children.length > MAX_LOG) {
+      logList.removeChild(logList.lastChild);
+    }
+  }
+
+  // ── Snapshot debug UI ─────────────────────────────────────────────────────
+  function updateSnapshotUI(snap) {
+    for (const [key, el] of Object.entries(snapFields)) {
+      if (!el) continue;
+      const val = snap[key];
+      el.textContent = val === undefined || val === null
+        ? '—'
+        : typeof val === 'boolean'
+          ? (val ? 'Yes' : 'No')
+          : typeof val === 'number'
+            ? val.toFixed(val % 1 === 0 ? 0 : 1)
+            : val;
+    }
+  }
+
+  // ── Status helpers ────────────────────────────────────────────────────────
+  function setStatus(state, label) {
+    statusText.textContent = label;
+    statusDot.className = `status-dot${state === 'live' ? ' live' : state === 'clear' ? ' clear' : ''}`;
+  }
+
+  // ── Audio unlock (browser autoplay policy) ────────────────────────────────
+  // Must call audio.play() / AudioContext resume inside a user gesture.
+  function unlockAudio() {
+    unlockAllAudio();
+  }
+
+  // ── Audio Sound Check buttons ─────────────────────────────────────────────
+  document.querySelectorAll('.btn-cue-test').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cue = btn.getAttribute('data-cue');
+      unlockAudio();
+      playCue(cue);
+      handleCue(cue, 0.95);
+    });
+  });
+
+  // ── Init UI state ─────────────────────────────────────────────────────────
+  videoEl.style.display = 'none';
+</script>
+
+</body>
+</html>
