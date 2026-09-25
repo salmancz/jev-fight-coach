@@ -95,30 +95,46 @@ async function processSnapshot(snapshot) {
       return;
     }
 
-    // POST to backend proxy
-    const res = await fetch(`${CONFIG.BACKEND_URL}/analyze`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ snapshot }),
-      signal:  AbortSignal.timeout(600), // hard timeout — don't block next window
-    });
+    try {
+      const res = await fetch(`${CONFIG.BACKEND_URL}/analyze`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ snapshot }),
+        signal:  AbortSignal.timeout(600),
+      });
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Proxy ${res.status}: ${text}`);
+      if (!res.ok) throw new Error(`Proxy status: ${res.status}`);
+      const { cue, confidence } = await res.json();
+      maybePlayCue(cue, confidence);
+
+    } catch (fetchErr) {
+      // Standalone client-side fallback (e.g. on mobile without backend proxy)
+      const local = evaluateSnapshotLocally(snapshot);
+      maybePlayCue(local.cue, local.confidence);
     }
-
-    const { cue, confidence } = await res.json();
-
-    maybePlayCue(cue, confidence);
 
   } catch (err) {
-    if (err.name !== 'TimeoutError' && err.name !== 'AbortError') {
-      _onError?.(`[coach] ${err.message}`);
-    }
+    _onError?.(`[coach] ${err.message}`);
   } finally {
     pendingRequest = false;
   }
+}
+
+function evaluateSnapshotLocally(snap) {
+  if (snap.rear_hand_pullback) {
+    return { cue: 'right_hand_loading', confidence: 0.88 };
+  } else if (snap.lead_hand_velocity_toward_camera === 'fast') {
+    return { cue: 'jab_loading', confidence: 0.82 };
+  } else if (snap.arm_extension === 'overextended') {
+    return { cue: 'overextended', confidence: 0.91 };
+  } else if (snap.sustained_low_guard_ms > 2000) {
+    return { cue: 'fatigue_low_guard', confidence: 0.79 };
+  } else if (snap.guard_height === 'low') {
+    return { cue: 'guard_dropping', confidence: 0.75 };
+  } else if (snap.weight_shift === 'lunging_forward') {
+    return { cue: 'closing_distance', confidence: 0.72 };
+  }
+  return { cue: 'all_clear', confidence: 0.85 };
 }
 
 // ─── Local pre-filter ─────────────────────────────────────────────────────────
