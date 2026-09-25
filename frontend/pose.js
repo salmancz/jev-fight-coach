@@ -50,10 +50,12 @@ export async function initPose(videoEl, overlayEl, onLandmarks, model = 'lite') 
   _onLandmarks = onLandmarks;
   overlayCtx   = overlayEl.getContext('2d');
 
-  // ── 1. Load the WASM runtime locally ──
-  const vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm');
+  // ── 1. Load the WASM runtime ──
+  const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const wasmPath = isLocal ? '/mediapipe/wasm' : 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+  const vision = await FilesetResolver.forVisionTasks(wasmPath);
 
-  // ── 2. Load the pose model locally ──
+  // ── 2. Load the pose model ──
   const modelAssetPath = './models/pose_landmarker_lite.task';
 
   poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
