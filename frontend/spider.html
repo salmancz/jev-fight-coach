@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#000000" />
+  <title>Spider Sense</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+    }
+  }
+  </script>
+  <style>
+    :root {
+      --bg: #000;
+      --panel: rgba(14, 14, 16, 0.92);
+      --line: rgba(255, 255, 255, 0.12);
+      --text: #f5f5f7;
+      --muted: #9a9aa2;
+      --live: #30d158;
+      --warn: #ffd60a;
+      --err: #ff453a;
+      --busy: #64d2ff;
+      --accent: #ff3b30;
+      --duck: #ff453a;
+      --side: #64d2ff;
+      --back: #ffd60a;
+      --jump: #bf5af2;
+      --radius: 14px;
+      --gap: 12px;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, monospace;
+      --cue-size: clamp(64px, 22vw, 180px);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); overflow: hidden; -webkit-user-select: none; user-select: none; }
+    button, select, input { font: inherit; color: inherit; }
+
+    #stage { position: fixed; inset: 0; }
+    #video, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      padding: calc(env(safe-area-inset-top) + 8px) 16px 8px;
+      display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+      background: linear-gradient(var(--panel), transparent);
+      font-size: 13px;
+    }
+    #status { flex: 1 1 100%; font-weight: 600; }
+    #status[data-kind="live"] { color: var(--live); }
+    #status[data-kind="warn"] { color: var(--warn); }
+    #status[data-kind="err"] { color: var(--err); }
+    #status[data-kind="busy"] { color: var(--busy); }
+    .stat { color: var(--muted); }
+    .stat b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+
+    #cue {
+      position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none;
+      font-size: var(--cue-size); font-weight: 900; letter-spacing: 0.02em;
+      opacity: 0; transition: opacity 120ms;
+      text-shadow: 0 4px 30px rgba(0, 0, 0, 0.8);
+    }
+    #cue.flash { opacity: 1; transition: none; }
+    #cue[data-cue="duck"] { color: var(--duck); }
+    #cue[data-cue="left"], #cue[data-cue="right"] { color: var(--side); }
+    #cue[data-cue="back"] { color: var(--back); }
+    #cue[data-cue="jump"] { color: var(--jump); }
+
+    #bar {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      padding: 10px 16px calc(env(safe-area-inset-bottom) + 12px);
+      display: flex; gap: var(--gap);
+      background: linear-gradient(transparent, var(--panel));
+    }
+    #start {
+      flex: 1; min-height: 56px; border: 0; border-radius: var(--radius);
+      background: var(--accent); font-weight: 800; font-size: 18px;
+    }
+    #start.live { background: #3a3a3c; }
+    #start:disabled { opacity: 0.5; }
+    #toggle-panel {
+      min-height: 56px; padding: 0 18px; border-radius: var(--radius);
+      border: 1px solid var(--line); background: var(--panel); font-weight: 600;
+    }
+
+    #panel {
+      position: fixed; left: 0; right: 0; bottom: 0; max-height: 72vh; overflow-y: auto;
+      padding: 18px 16px calc(env(safe-area-inset-bottom) + 92px);
+      background: var(--panel); border-top: 1px solid var(--line);
+      border-radius: var(--radius) var(--radius) 0 0;
+      transform: translateY(100%); transition: transform 200ms ease;
+      -webkit-user-select: text; user-select: text;
+    }
+    #panel.open { transform: translateY(0); }
+    #panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 18px 0 8px; }
+    #panel h2:first-child { margin-top: 0; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; margin-bottom: 12px; }
+    .row label { font-size: 14px; }
+    .row output { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+    .row input[type="range"], .row select { grid-column: 1 / -1; width: 100%; }
+    select { background: #1c1c1e; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+    .hint { font-size: 12px; color: var(--muted); grid-column: 1 / -1; margin: 0; }
+    #tests { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+    #tests button { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: #1c1c1e; font-weight: 700; font-size: 13px; }
+    #log { font-family: var(--mono); font-size: 11px; white-space: pre; overflow-x: auto; color: var(--muted); min-height: 3em; margin: 0; }
+    ol.tips { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="hud">
+    <div id="status" data-kind="idle">Tap Start. Mount the phone, back camera facing your opponent.</div>
+    <span class="stat">fps <b id="fps">-</b></span>
+    <span class="stat">model <b id="proc">-</b></span>
+    <span class="stat">last cue <b id="lat">-</b></span>
+    <span class="stat">hand speed <b id="speed">-</b></span>
+    <span class="stat">you moving <b id="gyro">-</b></span>
+  </div>
+
+  <div id="cue" aria-live="assertive"></div>
+
+  <section id="panel" aria-label="Settings">
+    <h2>Test earphones</h2>
+    <div id="tests"></div>
+
+    <h2>Camera</h2>
+    <div class="row">
+      <label for="camera">Lens</label>
+      <select id="camera"><option value="">Back camera (auto)</option></select>
+      <p class="hint">Ultra Wide is picked automatically when available. At punching range the normal lens can't fit his shoulders and arms.</p>
+    </div>
+    <div class="row">
+      <label for="model">Pose model</label>
+      <select id="model">
+        <option value="lite">Lite (fastest)</option>
+        <option value="full">Full (more accurate, slower)</option>
+      </select>
+    </div>
+
+    <h2>Detection</h2>
+    <div class="row">
+      <label for="sens">Trigger speed (lower = more sensitive)</label>
+      <output id="sens-val"></output>
+      <input id="sens" type="range" min="1.5" max="8" step="0.1" />
+      <p class="hint">Hand speed in shoulder-widths per second. Watch "hand speed" in the top bar while he swings, set this just under it.</p>
+    </div>
+    <div class="row">
+      <label for="confirm">Confirm frames</label>
+      <select id="confirm">
+        <option value="1">1 (fastest, more false alarms)</option>
+        <option value="2">2 (balanced)</option>
+        <option value="3">3 (safest, slower)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="refr">Pause after a cue</label>
+      <output id="refr-val"></output>
+      <input id="refr" type="range" min="300" max="1500" step="50" />
+    </div>
+    <div class="row">
+      <label for="gyro-gate">Ignore while you move faster than</label>
+      <output id="gyro-gate-val"></output>
+      <input id="gyro-gate" type="range" min="60" max="400" step="10" />
+      <p class="hint">Uses the phone's gyroscope so your own ducking and turning never triggers a cue.</p>
+    </div>
+
+    <h2>Voice</h2>
+    <div class="row">
+      <label for="voice">Voice speed</label>
+      <output id="voice-val"></output>
+      <input id="voice" type="range" min="0.8" max="2" step="0.1" />
+      <p class="hint">Clips are already 1.5x faster than normal speech. Going above 1.0 here also raises the pitch.</p>
+    </div>
+
+    <h2>Cue log</h2>
+    <pre id="log"></pre>
+
+    <h2>Before you test</h2>
+    <ol class="tips">
+      <li>Wired earphones only. Bluetooth adds 150 to 250 ms of delay.</li>
+      <li>Silent switch off, volume up.</li>
+      <li>Padded objects only (foam noodle, pillow). Blindfolded, a real punch will land.</li>
+      <li>Your opponent stands 1 to 2 m away, both shoulders in frame.</li>
+      <li>Keep your own hands low or out of the camera's view.</li>
+      <li>Use iPhone Screen Recording to capture this view for the video.</li>
+    </ol>
+  </section>
+
+  <div id="bar">
+    <button id="start" type="button">Start</button>
+    <button id="toggle-panel" type="button" aria-expanded="false" aria-controls="panel">Settings</button>
+  </div>
+
+  <script type="module" src="./spider.js"></script>
+</body>
+</html>
