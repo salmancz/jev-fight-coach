@@ -3,19 +3,23 @@
 // unit = shoulder width, rotated by shoulder-line roll), so camera shake from the wearer
 // moving cancels out instead of looking like a strike.
 
-const J = { LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16 };
+const J = { NOSE: 0, LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16 };
 
 export const DEFAULTS = {
   speedThreshold: 3.5,
-  confirmFrames: 2,
+  confirmFrames: 3,
   refractoryMs: 700,
   lookaheadS: 0.08,
   highZone: 0.3,
   lowZone: 1.0,
-  minShoulderVis: 0.5,
-  minJointVis: 0.3,
+  minShoulderVis: 0.7,
+  minHeadVis: 0.7,
+  minArmVis: 0.5,
+  minJointVis: 0.5,
+  minShoulderWidth: 0.05,
+  armMs: 300,
+  velocityWindowMs: 45,
   glitchSpeed: 40,
-  minHistory: 3,
 };
 
 export const CUE_IDS = ['duck', 'left', 'right', 'back', 'jump'];
@@ -28,10 +32,20 @@ export function createDetector(overrides = {}) {
   let roll = 0;
   let pending = null;
   let lastFireT = -Infinity;
+  let armStart = null;
 
   function reset() {
     hist.length = 0;
     pending = null;
+    armStart = null;
+    scaleEma = null;
+    worldScaleEma = null;
+    roll = 0;
+  }
+
+  function lost(status) {
+    reset();
+    return { cue: null, status, locked: false };
   }
 
   function toBody(p, mx, my, scale) {
@@ -46,22 +60,29 @@ export function createDetector(overrides = {}) {
     const pt = (i) => ({ x: lm[i].x * aspect, y: lm[i].y, v: lm[i].visibility ?? 1 });
     const ls = pt(J.LS);
     const rs = pt(J.RS);
+    const nose = pt(J.NOSE);
 
-    if (ls.v < cfg.minShoulderVis || rs.v < cfg.minShoulderVis) {
-      reset();
-      return { cue: null, status: 'no-shoulders' };
-    }
+    // A real person has a visible face, both shoulders and arms; phantom poses on clutter don't.
+    if (ls.v < cfg.minShoulderVis || rs.v < cfg.minShoulderVis) return lost('no-person');
+    if (nose.v < cfg.minHeadVis) return lost('no-head');
+    const armVis = [J.LE, J.RE, J.LW, J.RW].reduce((s, i) => s + (lm[i].visibility ?? 1), 0) / 4;
+    if (armVis < cfg.minArmVis) return lost('no-arms');
 
     const [a, b] = ls.x <= rs.x ? [ls, rs] : [rs, ls];
     const sRaw = Math.hypot(b.x - a.x, b.y - a.y);
-    if (scaleEma === null) scaleEma = sRaw;
-    const frontal = sRaw > 0.6 * scaleEma;
-    if (frontal) {
+    if (sRaw < cfg.minShoulderWidth) return lost('too-small');
+    if (scaleEma === null) {
+      scaleEma = sRaw;
+      roll = Math.atan2(b.y - a.y, b.x - a.x);
+    }
+    if (sRaw > 0.6 * scaleEma) {
       scaleEma = scaleEma * 0.9 + sRaw * 0.1;
       roll = Math.atan2(b.y - a.y, b.x - a.x);
     }
     const mx = (ls.x + rs.x) / 2;
     const my = (ls.y + rs.y) / 2;
+
+    if (toBody(nose, mx, my, scaleEma).y > -0.15) return lost('no-head');
 
     let wShoulderZ = null;
     if (world) {
@@ -81,17 +102,25 @@ export function createDetector(overrides = {}) {
     }
 
     hist.push({ t, joints });
-    if (hist.length > 8) hist.shift();
-    if (hist.length < cfg.minHistory) {
+    while (hist.length > 2 && t - hist[0].t > 250) hist.shift();
+
+    if (armStart === null) armStart = t;
+    if (t - armStart < cfg.armMs) {
       pending = null;
-      return { cue: null, status: 'warming-up' };
+      return { cue: null, status: 'locking-on', locked: false };
     }
 
     const now = hist[hist.length - 1];
-    const then = hist[hist.length - 3];
+    let then = null;
+    for (let i = hist.length - 2; i >= 0; i--) {
+      if (now.t - hist[i].t >= cfg.velocityWindowMs) {
+        then = hist[i];
+        break;
+      }
+    }
+    if (!then) return { cue: null, status: 'warming-up', locked: true };
     const first = hist[0];
     const dt = (now.t - then.t) / 1000;
-    if (dt <= 0) return { cue: null, status: 'bad-dt' };
 
     let best = null;
     for (const name of ['lw', 'rw', 'le', 're']) {
@@ -106,10 +135,7 @@ export function createDetector(overrides = {}) {
         sz = -((j.depth - jp.depth) / dt) / worldScaleEma;
       }
       const mag = Math.max(s2, sz);
-      if (mag > cfg.glitchSpeed) {
-        reset();
-        return { cue: null, status: 'tracking-jump' };
-      }
+      if (mag > cfg.glitchSpeed) return lost('tracking-jump');
       if (!best || mag > best.mag) {
         best = { name, j, vx, vy, s2, sz, mag, startX: first.joints[name].x };
       }
@@ -121,30 +147,30 @@ export function createDetector(overrides = {}) {
 
     if (selfMotion) {
       pending = null;
-      return { cue: null, status: 'self-motion', debug };
+      return { cue: null, status: 'self-motion', debug, locked: true };
     }
 
     if (!best || best.mag < cfg.speedThreshold) {
       pending = null;
-      return { cue: null, status: 'calm', debug };
+      return { cue: null, status: 'calm', debug, locked: true };
     }
 
     const cue = classify(best, cfg);
     debug.zone = cue;
     if (!cue) {
       pending = null;
-      return { cue: null, status: 'undecided', debug };
+      return { cue: null, status: 'undecided', debug, locked: true };
     }
 
     if (pending && pending.cue === cue) pending.count += 1;
     else pending = { cue, count: 1 };
 
-    if (pending.count < cfg.confirmFrames) return { cue: null, status: 'confirming', debug };
-    if (t - lastFireT < cfg.refractoryMs) return { cue: null, status: 'refractory', debug };
+    if (pending.count < cfg.confirmFrames) return { cue: null, status: 'confirming', debug, locked: true };
+    if (t - lastFireT < cfg.refractoryMs) return { cue: null, status: 'refractory', debug, locked: true };
 
     lastFireT = t;
     pending = null;
-    return { cue, status: 'fired', debug };
+    return { cue, status: 'fired', debug, locked: true };
   }
 
   return { frame, reset, cfg };

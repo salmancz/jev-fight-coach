@@ -15,11 +15,11 @@ const CUES = {
   jump:  { label: 'JUMP',  pan: 0,  tone: [300, 700],  pulses: 1 },
 };
 
-const SETTINGS_KEY = 'spider-sense-settings';
+const SETTINGS_KEY = 'spider-sense-settings-v2';
 const settings = loadSettings({
   speedThreshold: 3.5,
   refractoryMs: 700,
-  confirmFrames: 2,
+  confirmFrames: 3,
   voiceRate: 1.0,
   gyroGate: 150,
   model: 'lite',
@@ -46,6 +46,8 @@ let stream = null;
 let audio = null;
 let voices = {};
 let gyroMag = 0;
+let lastMotionT = 0;
+let motionListening = false;
 let wakeLock = null;
 let frameCount = 0;
 let fpsT0 = performance.now();
@@ -53,24 +55,26 @@ let lastLogged = [];
 
 bindControls();
 
-el.start.addEventListener('click', async () => {
+el.start.addEventListener('click', () => {
   if (running) return stop();
+  // iOS only grants motion + audio when requested synchronously inside the tap.
+  const motion = requestMotion();
+  unlockAudio();
   el.start.disabled = true;
-  try {
-    await start();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`, 'err');
-    console.error(err);
-    stop();
-  } finally {
-    el.start.disabled = false;
-  }
+  start(motion)
+    .catch((err) => {
+      setStatus(`Error: ${err.message}`, 'err');
+      console.error(err);
+      stop();
+    })
+    .finally(() => {
+      el.start.disabled = false;
+    });
 });
 
-async function start() {
-  setStatus('Unlocking audio...', 'busy');
-  await initAudio();
-  await requestMotion();
+async function start(motion) {
+  setStatus('Loading voices...', 'busy');
+  await Promise.all([loadVoices(), motion]);
   await requestWakeLock();
 
   setStatus('Loading pose model...', 'busy');
@@ -187,19 +191,19 @@ function onFrame(_now, meta) {
   const lm = result.landmarks?.[0];
   const world = result.worldLandmarks?.[0];
   if (lm) {
-    drawing.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS, { color: 'rgba(255,255,255,0.35)', lineWidth: 2 });
-    drawing.drawLandmarks([lm[13], lm[14], lm[15], lm[16]], { color: '#ff3b30', fillColor: '#ff3b30', radius: 5 });
-
-    const selfMotion = gyroMag > settings.gyroGate;
+    const selfMotion = gyroAlive() && gyroMag > settings.gyroGate;
     const r = detector.frame(lm, world, t0, w / h, selfMotion);
+    if (r.locked) {
+      drawing.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS, { color: 'rgba(48,209,88,0.6)', lineWidth: 3 });
+      drawing.drawLandmarks([lm[13], lm[14], lm[15], lm[16]], { color: '#ff3b30', fillColor: '#ff3b30', radius: 6 });
+    }
     el.speed.textContent = r.debug ? `${r.debug.speed} (${r.debug.joint})` : '-';
     if (r.cue) fire(r.cue, t0, meta?.captureTime, r.debug);
-    if (!r.cue && r.status === 'no-shoulders') setStatus('Can\'t see both shoulders: step back or use ultra wide', 'warn');
-    else if (!r.cue) setStatus(`Live: ${r.status}`, 'live');
+    else showStatus(r.status);
   } else {
     detector.reset();
     el.speed.textContent = '-';
-    setStatus('Live: no person in frame', 'warn');
+    showStatus('no-person');
   }
 
   el.proc.textContent = `${procMs.toFixed(0)} ms`;
@@ -210,8 +214,23 @@ function onFrame(_now, meta) {
     frameCount = 0;
     fpsT0 = now;
   }
-  el.gyro.textContent = `${Math.round(gyroMag)}°/s`;
+  el.gyro.textContent = gyroAlive() ? `${Math.round(gyroMag)}°/s` : 'sensor off';
   scheduleFrame();
+}
+
+const STATUS = {
+  'no-person': ['Looking for a person...', 'warn'],
+  'no-head': ['Need his face in frame', 'warn'],
+  'no-arms': ['Need both his arms in frame', 'warn'],
+  'too-small': ['Person too far away: move closer', 'warn'],
+  'tracking-jump': ['Lost him, re-locking...', 'warn'],
+  'locking-on': ['Locking on...', 'busy'],
+  'self-motion': ['Locked on: paused while you move', 'busy'],
+};
+
+function showStatus(status) {
+  const [text, kind] = STATUS[status] ?? ['Locked on: watching his hands', 'live'];
+  setStatus(text, kind);
 }
 
 function fire(cue, frameT0, captureTime, debug) {
@@ -243,21 +262,23 @@ function showCue(cue) {
 
 // ── Audio ────────────────────────────────────────────────────────────────────
 
-async function initAudio() {
+function unlockAudio() {
   if (navigator.audioSession) {
     try { navigator.audioSession.type = 'playback'; } catch {}
   }
   if (!audio) {
     audio = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
   }
-  await audio.resume();
+  audio.resume();
 
   // Silent blip inside the tap gesture fully unlocks iOS output.
   const blip = audio.createBufferSource();
   blip.buffer = audio.createBuffer(1, 1, audio.sampleRate);
   blip.connect(audio.destination);
   blip.start();
+}
 
+async function loadVoices() {
   await Promise.all(CUE_IDS.map(async (id) => {
     if (voices[id]) return;
     try {
@@ -321,20 +342,32 @@ function playCue(cue) {
 
 // ── Sensors / device ─────────────────────────────────────────────────────────
 
-async function requestMotion() {
-  try {
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      const state = await DeviceMotionEvent.requestPermission();
-      if (state !== 'granted') return;
-    }
-    window.addEventListener('devicemotion', (e) => {
-      const r = e.rotationRate;
-      if (!r) return;
-      gyroMag = Math.hypot(r.alpha ?? 0, r.beta ?? 0, r.gamma ?? 0);
+function requestMotion() {
+  if (typeof DeviceMotionEvent === 'undefined') return Promise.resolve('unsupported');
+  const ask = typeof DeviceMotionEvent.requestPermission === 'function'
+    ? DeviceMotionEvent.requestPermission()
+    : Promise.resolve('granted');
+  return ask
+    .then((state) => {
+      if (state === 'granted' && !motionListening) {
+        motionListening = true;
+        window.addEventListener('devicemotion', (e) => {
+          const r = e.rotationRate;
+          if (!r) return;
+          gyroMag = Math.hypot(r.alpha ?? 0, r.beta ?? 0, r.gamma ?? 0);
+          lastMotionT = performance.now();
+        });
+      }
+      return state;
+    })
+    .catch((err) => {
+      console.warn('[motion] unavailable', err);
+      return 'error';
     });
-  } catch (err) {
-    console.warn('[motion] unavailable', err);
-  }
+}
+
+function gyroAlive() {
+  return performance.now() - lastMotionT < 1000;
 }
 
 async function requestWakeLock() {
@@ -390,7 +423,8 @@ function bindControls() {
     b.type = 'button';
     b.textContent = CUES[id].label;
     b.addEventListener('click', async () => {
-      if (!audio) await initAudio();
+      unlockAudio();
+      await loadVoices();
       playCue(id);
       showCue(id);
     });
