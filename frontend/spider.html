@@ -17,6 +17,8 @@
     :root {
       --bg: #000;
       --panel: rgba(14, 14, 16, 0.92);
+      --panel-solid: #0e0e10;
+      --warn-bg: rgba(255, 214, 10, 0.12);
       --line: rgba(255, 255, 255, 0.12);
       --text: #f5f5f7;
       --muted: #9a9aa2;
@@ -107,6 +109,19 @@
     #tests button { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: #1c1c1e; font-weight: 700; font-size: 13px; }
     #log { font-family: var(--mono); font-size: 11px; white-space: pre; overflow-x: auto; color: var(--muted); min-height: 3em; margin: 0; }
     ol.tips { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+    #warnings { list-style: none; margin: 0; padding: 0; flex: 1 1 100%; display: grid; gap: 6px; }
+    #warnings li { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); border-radius: 10px; padding: 8px 10px; font-size: 12px; font-weight: 600; }
+    .tones-hint { margin-top: 8px; }
+    .wide-btn { width: 100%; min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: #1c1c1e; font-weight: 700; }
+    dialog#checklist { width: min(92vw, 460px); max-height: 88vh; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-solid); color: var(--text); padding: 20px; }
+    dialog#checklist::backdrop { background: rgba(0, 0, 0, 0.75); }
+    dialog#checklist h2 { margin: 0 0 4px; font-size: 20px; }
+    dialog#checklist p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+    dialog#checklist label { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 15px; line-height: 1.35; }
+    dialog#checklist label span small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    dialog#checklist input[type="checkbox"] { width: 24px; height: 24px; margin: 0; accent-color: var(--accent); }
+    #checklist-done { margin-top: 16px; width: 100%; min-height: 54px; border: 0; border-radius: var(--radius); background: var(--accent); font-weight: 800; font-size: 17px; }
+    #checklist-done:disabled { opacity: 0.4; }
   </style>
 </head>
 <body>
@@ -122,6 +137,8 @@
     <span class="stat">last cue <b id="lat">-</b></span>
     <span class="stat">hand speed <b id="speed">-</b></span>
     <span class="stat">you moving <b id="gyro">-</b></span>
+    <span class="stat">audio delay <b id="audio-lat">-</b></span>
+    <ul id="warnings" aria-live="polite"></ul>
   </div>
 
   <div id="cue" aria-live="assertive"></div>
@@ -129,6 +146,7 @@
   <section id="panel" aria-label="Settings">
     <h2>Test earphones</h2>
     <div id="tests"></div>
+    <p class="hint tones-hint">Rising two-note tone = locked onto him. Falling tone = lost him: stop and reset.</p>
 
     <h2>Camera</h2>
     <div class="row">
@@ -160,18 +178,27 @@
       </select>
     </div>
     <div class="row">
-      <label for="refr">Pause after a cue</label>
-      <output id="refr-val"></output>
-      <input id="refr" type="range" min="300" max="1500" step="50" />
+      <label for="gap">Minimum gap between cues</label>
+      <output id="gap-val"></output>
+      <input id="gap" type="range" min="100" max="800" step="50" />
+      <p class="hint">One swing always gives one cue. A combo with the other hand (jab then hook) can fire again after this gap.</p>
     </div>
     <div class="row">
-      <label for="gyro-gate">Ignore while you move faster than</label>
+      <label for="gyro-gate">You count as moving above</label>
       <output id="gyro-gate-val"></output>
       <input id="gyro-gate" type="range" min="60" max="400" step="10" />
-      <p class="hint">Uses the phone's gyroscope so your own ducking and turning never triggers a cue.</p>
+      <p class="hint">While you duck or turn, cues still fire but need a harder, faster swing, so your own movement doesn't trigger them.</p>
     </div>
 
     <h2>Voice</h2>
+    <div class="row">
+      <label for="callout">LEFT / RIGHT means</label>
+      <select id="callout">
+        <option value="move">Move this way (RIGHT = lean right)</option>
+        <option value="threat">It's coming from this side (RIGHT = lean left)</option>
+      </select>
+      <p class="hint">The word plays in the ear it names. Agree on this with your friend before the blindfold goes on.</p>
+    </div>
     <div class="row">
       <label for="voice">Voice speed</label>
       <output id="voice-val"></output>
@@ -182,16 +209,33 @@
     <h2>Cue log</h2>
     <pre id="log"></pre>
 
-    <h2>Before you test</h2>
+    <h2>Safety</h2>
+    <button id="open-checklist" class="wide-btn" type="button">Open safety checklist</button>
+
+    <h2>What it can't do</h2>
     <ol class="tips">
-      <li>Wired earphones only. Bluetooth adds 150 to 250 ms of delay.</li>
-      <li>Silent switch off, volume up.</li>
-      <li>Padded objects only (foam noodle, pillow). Blindfolded, a real punch will land.</li>
-      <li>Your opponent stands 1 to 2 m away, both shoulders in frame.</li>
-      <li>Keep your own hands low or out of the camera's view.</li>
-      <li>Use iPhone Screen Recording to capture this view for the video.</li>
+      <li>It tracks his hand, not what he holds. A noodle's tip can hit high while his hand is low.</li>
+      <li>From one camera, a straight jab at the lens is the hardest to see (BACK is the least reliable cue).</li>
+      <li>A swing slower than the trigger speed never fires, by design.</li>
+      <li>Feints and any fast arm movement can fire a cue. Ask him to keep his hands still between swings.</li>
+      <li>Mirrors and screens showing people can be tracked as a person. Cover them.</li>
     </ol>
   </section>
+
+  <dialog id="checklist" aria-labelledby="checklist-title">
+    <h2 id="checklist-title">Before the blindfold</h2>
+    <p>Tick every line. You'll be asked once a day.</p>
+    <label><input type="checkbox" /><span>Pillow or cushion only<small>Not fists, not a noodle: the app tracks his hand, not the tip.</small></span></label>
+    <label><input type="checkbox" /><span>Wired earphones, silent switch off, volume up<small>Bluetooth adds 150 to 250 ms. Use the test buttons in Settings.</small></span></label>
+    <label><input type="checkbox" /><span>Every light on<small>Dim light blurs fast hands and lowers the frame rate.</small></span></label>
+    <label><input type="checkbox" /><span>2 m around you is clear<small>You will dodge blind. Move the cooler, chairs and laptop table.</small></span></label>
+    <label><input type="checkbox" /><span>A third person is watching and can call stop</span></label>
+    <label><input type="checkbox" /><span>Phone charged, Low Power Mode off, Do Not Disturb on, Auto-Lock Never<small>Calls and heat stop the camera or slow it down.</small></span></label>
+    <label><input type="checkbox" /><span>Phone strapped tight on your chest, upright, portrait lock on</span></label>
+    <label><input type="checkbox" /><span>He faces you square on, 1.5 to 2 m away, no mirrors or screens behind him</span></label>
+    <label><input type="checkbox" /><span>Practised with eyes open first, and you both agree what LEFT and RIGHT mean</span></label>
+    <button id="checklist-done" type="button" disabled>All set</button>
+  </dialog>
 
   <div id="bar">
     <button id="start" type="button">Start</button>
