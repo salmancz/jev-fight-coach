@@ -10,8 +10,9 @@ mkdir -p "$OUT"
 
 TRIM="silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.003,areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.02,areverse,atempo=1.5"
 
-for word in duck left right back jump; do
-  text="[shouting] ${word^}!"
+declare -A TEXT=([duck]="Duck!" [back]="Step back!")
+for word in "${!TEXT[@]}"; do
+  text="[shouting] ${TEXT[$word]}"
   curl -sS --fail-with-body -X POST https://api.fish.audio/v1/tts \
     -H "Authorization: Bearer $FISH_API_KEY" \
     -H "Content-Type: application/json" \

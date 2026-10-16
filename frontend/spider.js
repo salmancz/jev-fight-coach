@@ -8,27 +8,25 @@ const MODELS = {
 };
 
 const CUES = {
-  duck:  { label: 'DUCK',  pan: 0,  tone: [1500, 600], pulses: 1 },
-  left:  { label: 'LEFT',  pan: -1, tone: [950, 950],  pulses: 1 },
-  right: { label: 'RIGHT', pan: 1,  tone: [950, 950],  pulses: 1 },
-  back:  { label: 'BACK',  pan: 0,  tone: [650, 650],  pulses: 2 },
-  jump:  { label: 'JUMP',  pan: 0,  tone: [300, 700],  pulses: 1 },
+  duck: { label: 'DUCK', tone: [1500, 600], pulses: 1 },
+  back: { label: 'STEP BACK', tone: [650, 650], pulses: 2 },
 };
+// The cue is louder in the ear on the side the strike comes from. His left arm appears on the
+// right of the image (he faces the camera), which is the wearer's right side.
+const SIDE_PAN = { l: 0.6, r: -0.6 };
 
 const ULTRA_WIDE = /ultra ?wide|ultra grand|ultraweit|gran angular|grandangolare|ultra-amplo|超广角|超廣角|超広角|초광각|ультраширок/i;
 const FRONT = /front|avant|vorder|frontal|anterior|前面|前置|전면|фронт/i;
 
-const SETTINGS_KEY = 'spider-sense-settings-v3';
+const SETTINGS_KEY = 'spider-sense-settings-v4';
 const CHECKLIST_KEY = 'spider-sense-checklist-day';
 const settings = loadSettings({
-  speedThreshold: 3.5,
-  minGapMs: 200,
-  confirmFrames: 3,
+  minSpeed: 3.5,
+  confirmMs: 40,
   voiceRate: 1.0,
   gyroGate: 150,
-  model: 'lite',
+  model: 'full',
   deviceId: '',
-  callout: 'move',
 });
 
 const $ = (id) => document.getElementById(id);
@@ -36,8 +34,8 @@ const el = {
   video: $('video'), overlay: $('overlay'), start: $('start'), status: $('status'),
   cue: $('cue'), fps: $('fps'), proc: $('proc'), lat: $('lat'), audioLat: $('audio-lat'),
   speed: $('speed'), gyro: $('gyro'), log: $('log'), camera: $('camera'), model: $('model'),
-  sens: $('sens'), sensVal: $('sens-val'), gap: $('gap'), gapVal: $('gap-val'),
-  confirm: $('confirm'), voice: $('voice'), voiceVal: $('voice-val'), callout: $('callout'),
+  sens: $('sens'), sensVal: $('sens-val'),
+  confirm: $('confirm'), voice: $('voice'), voiceVal: $('voice-val'),
   gyroGate: $('gyro-gate'), gyroGateVal: $('gyro-gate-val'), tests: $('tests'),
   panel: $('panel'), togglePanel: $('toggle-panel'), warnings: $('warnings'),
   checklist: $('checklist'), checklistDone: $('checklist-done'), openChecklist: $('open-checklist'),
@@ -141,11 +139,7 @@ function stop() {
 }
 
 function detectorOpts() {
-  return {
-    speedThreshold: settings.speedThreshold,
-    minGapMs: settings.minGapMs,
-    confirmFrames: settings.confirmFrames,
-  };
+  return { minSpeed: settings.minSpeed, confirmMs: settings.confirmMs };
 }
 
 // ── Camera ───────────────────────────────────────────────────────────────────
@@ -269,15 +263,15 @@ function onFrame(_now, meta) {
 
   if (lm && r.locked) {
     drawing.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS, { color: 'rgba(48,209,88,0.6)', lineWidth: 3 });
-    drawing.drawLandmarks([lm[13], lm[14], lm[15], lm[16], lm[27], lm[28]], { color: '#ff3b30', fillColor: '#ff3b30', radius: 6 });
+    drawing.drawLandmarks([lm[13], lm[14], lm[15], lm[16]], { color: '#ff3b30', fillColor: '#ff3b30', radius: 6 });
   }
   if (r.gainedLock) playTone('locked');
   if (r.lostLock && t0 - lastLostToneT > 1500) {
     lastLostToneT = t0;
     playTone('lost');
   }
-  el.speed.textContent = r.debug ? `${r.debug.speed} (${r.debug.joint})` : '-';
-  if (r.cue) fire(r.cue, t0, meta?.captureTime, r.debug);
+  el.speed.textContent = r.debug ? `${r.debug.speed} (${r.debug.arm === 'l' ? 'his L' : 'his R'}, elbow ${r.debug.ey})` : '-';
+  if (r.cue) fire(r.cue, r.side, t0, meta?.captureTime, r.debug);
   else showStatus(r.status);
 
   el.proc.textContent = `${procMs.toFixed(0)} ms`;
@@ -303,6 +297,7 @@ const STATUS = {
   'locking-on': ['Locking on...', 'busy'],
   'holding': ['Locked on: tracking flickered, holding', 'busy'],
   'self-motion': ['Locked on: you are moving, needs a harder swing', 'busy'],
+  'walking': ['He is walking: paused', 'busy'],
 };
 
 function showStatus(status) {
@@ -310,16 +305,8 @@ function showStatus(status) {
   setStatus(text, kind);
 }
 
-function spoken(cue) {
-  if (settings.callout !== 'threat') return cue;
-  if (cue === 'left') return 'right';
-  if (cue === 'right') return 'left';
-  return cue;
-}
-
-function fire(rawCue, frameT0, captureTime, debug) {
-  const cue = spoken(rawCue);
-  playCue(cue);
+function fire(cue, side, frameT0, captureTime, debug) {
+  playCue(cue, side);
   const now = performance.now();
   const sinceCapture = captureTime ? now - captureTime : null;
   const useCapture = sinceCapture !== null && sinceCapture > 0 && sinceCapture < 1000;
@@ -328,7 +315,7 @@ function fire(rawCue, frameT0, captureTime, debug) {
   el.lat.textContent = `${Math.round(latency)} ms`;
   el.lat.title = label;
   showCue(cue);
-  lastLogged.unshift(`${new Date().toLocaleTimeString()}  ${CUES[cue].label.padEnd(5)}  ${Math.round(latency)}ms ${label}  ${debug?.joint ?? '-'} speed ${debug?.speed ?? '-'}`);
+  lastLogged.unshift(`${new Date().toLocaleTimeString()}  ${CUES[cue].label.padEnd(9)}  ${Math.round(latency)}ms ${label}  his ${side === 'l' ? 'L' : 'R'} arm, ${debug?.why ?? ''}`);
   lastLogged = lastLogged.slice(0, 12);
   el.log.textContent = lastLogged.join('\n');
 }
@@ -444,14 +431,14 @@ function beep(start, from, to, dur, gainPeak, dest, type = 'square') {
   osc.stop(start + dur + 0.01);
 }
 
-function playCue(cue) {
+function playCue(cue, side) {
   if (!audio) return;
   if (audio.state !== 'running') audio.resume();
   const spec = CUES[cue];
   const t = audio.currentTime;
 
   const panner = audio.createStereoPanner();
-  panner.pan.value = spec.pan;
+  panner.pan.value = SIDE_PAN[side] ?? 0;
   panner.connect(audio.destination);
 
   for (let p = 0; p < spec.pulses; p++) beep(t + p * 0.07, spec.tone[0], spec.tone[1], 0.05, 0.35, panner);
@@ -576,8 +563,7 @@ function bindControls() {
       if (detector) Object.assign(detector.cfg, detectorOpts());
     });
   };
-  bindRange(el.sens, el.sensVal, 'speedThreshold', (v) => v.toFixed(1));
-  bindRange(el.gap, el.gapVal, 'minGapMs', (v) => `${v} ms`);
+  bindRange(el.sens, el.sensVal, 'minSpeed', (v) => v.toFixed(1));
   bindRange(el.voice, el.voiceVal, 'voiceRate', (v) => `${v.toFixed(1)}x`);
   bindRange(el.gyroGate, el.gyroGateVal, 'gyroGate', (v) => `${v}°/s`);
 
@@ -589,10 +575,9 @@ function bindControls() {
       onChange?.();
     });
   };
-  bindSelect(el.confirm, 'confirmFrames', Number, () => {
+  bindSelect(el.confirm, 'confirmMs', Number, () => {
     if (detector) Object.assign(detector.cfg, detectorOpts());
   });
-  bindSelect(el.callout, 'callout');
   bindSelect(el.model, 'model', String, () => {
     if (running) setStatus('Model changes apply on next Start', 'warn');
   });

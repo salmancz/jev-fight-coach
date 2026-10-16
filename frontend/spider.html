@@ -157,31 +157,26 @@
     <div class="row">
       <label for="model">Pose model</label>
       <select id="model">
-        <option value="lite">Lite (fastest)</option>
-        <option value="full">Full (more accurate, slower)</option>
+        <option value="lite">Lite (faster, less accurate)</option>
+        <option value="full">Full (tuned on this, recommended)</option>
       </select>
     </div>
 
     <h2>Detection</h2>
     <div class="row">
-      <label for="sens">Trigger speed (lower = more sensitive)</label>
+      <label for="sens">Minimum fist speed</label>
       <output id="sens-val"></output>
-      <input id="sens" type="range" min="1.5" max="8" step="0.1" />
-      <p class="hint">Hand speed in shoulder-widths per second. Watch "hand speed" in the top bar while he swings, set this just under it.</p>
+      <input id="sens" type="range" min="2" max="8" step="0.1" />
+      <p class="hint">A cue needs his elbow up at shoulder height (or fist above his head) AND the fist moving at least this fast. 3.5 is tuned on real footage.</p>
     </div>
     <div class="row">
-      <label for="confirm">Confirm frames</label>
+      <label for="confirm">Hold time before calling it</label>
       <select id="confirm">
-        <option value="1">1 (fastest, more false alarms)</option>
-        <option value="2">2 (balanced)</option>
-        <option value="3">3 (safest, slower)</option>
+        <option value="30">30 ms (faster, slightly more false alarms)</option>
+        <option value="40">40 ms (tuned on real footage)</option>
+        <option value="60">60 ms (safest, slower)</option>
       </select>
-    </div>
-    <div class="row">
-      <label for="gap">Minimum gap between cues</label>
-      <output id="gap-val"></output>
-      <input id="gap" type="range" min="100" max="800" step="50" />
-      <p class="hint">One swing always gives one cue. A combo with the other hand (jab then hook) can fire again after this gap.</p>
+      <p class="hint">One swing gives one cue. A combo with his other hand can fire again 250 ms later.</p>
     </div>
     <div class="row">
       <label for="gyro-gate">You count as moving above</label>
@@ -191,14 +186,7 @@
     </div>
 
     <h2>Voice</h2>
-    <div class="row">
-      <label for="callout">LEFT / RIGHT means</label>
-      <select id="callout">
-        <option value="move">Move this way (RIGHT = lean right)</option>
-        <option value="threat">It's coming from this side (RIGHT = lean left)</option>
-      </select>
-      <p class="hint">The word plays in the ear it names. Agree on this with your friend before the blindfold goes on.</p>
-    </div>
+    <p class="hint">DUCK = hook or overhand at your head. STEP BACK = straight punch down the middle. The word is louder in the ear on the side the punch comes from.</p>
     <div class="row">
       <label for="voice">Voice speed</label>
       <output id="voice-val"></output>
@@ -215,9 +203,9 @@
     <h2>What it can't do</h2>
     <ol class="tips">
       <li>It tracks his hand, not what he holds. A noodle's tip can hit high while his hand is low.</li>
-      <li>From one camera, a straight jab at the lens is the hardest to see (BACK is the least reliable cue).</li>
-      <li>A swing slower than the trigger speed never fires, by design.</li>
-      <li>Feints and any fast arm movement can fire a cue. Ask him to keep his hands still between swings.</li>
+      <li>Tuned on one real session of hooks and overhands. STEP BACK (straight punches) has not been checked on real footage yet.</li>
+      <li>Body shots, low swings and kicks are not detected.</li>
+      <li>A feint with the elbow up looks like a real hook and will fire.</li>
       <li>Mirrors and screens showing people can be tracked as a person. Cover them.</li>
     </ol>
   </section>
@@ -233,7 +221,7 @@
     <label><input type="checkbox" /><span>Phone charged, Low Power Mode off, Do Not Disturb on, Auto-Lock Never<small>Calls and heat stop the camera or slow it down.</small></span></label>
     <label><input type="checkbox" /><span>Phone strapped tight on your chest, upright, portrait lock on</span></label>
     <label><input type="checkbox" /><span>He faces you square on, 1.5 to 2 m away, no mirrors or screens behind him</span></label>
-    <label><input type="checkbox" /><span>Practised with eyes open first, and you both agree what LEFT and RIGHT mean</span></label>
+    <label><input type="checkbox" /><span>Practised with eyes open first: DUCK for hooks, STEP BACK for straight punches</span></label>
     <button id="checklist-done" type="button" disabled>All set</button>
   </dialog>
 

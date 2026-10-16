@@ -1,26 +1,21 @@
-// Pure if/else strike detector for a chest/head-mounted POV camera.
-// All motion is measured in the attacker's own body frame (origin = shoulder midpoint,
-// unit = shoulder width, rotated by shoulder-line roll), so camera shake from the wearer
-// moving cancels out instead of looking like a strike.
+// If/else strike detector, tuned on real footage (tests/fixtures + tests/replay.mjs).
+//
+// The main tell is the ELBOW COMING UP: in every hook and overhand in the real footage the
+// striking elbow rose to (or above) shoulder height, while standing, walking and holding a guard
+// kept both elbows low. A strike = elbow up (or fist above his nose) + wrist high + moving, held
+// for confirmMs. Single-frame tracker flicker is removed by a 3-frame median first.
+//
+// Positions are in his body frame: origin = shoulder midpoint, unit = shoulder width,
+// y down. So y < 0 is above his shoulder line, |x| > 1 is outside his shoulders.
 
-const J = { NOSE: 0, LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16, LH: 23, RH: 24, LA: 27, RA: 28 };
-
-const JOINTS = [
-  { name: 'lw', idx: J.LW, limb: 'la', parent: J.LE, kind: 'wrist', side: 'l', shoulder: J.LS },
-  { name: 'rw', idx: J.RW, limb: 'ra', parent: J.RE, kind: 'wrist', side: 'r', shoulder: J.RS },
-  { name: 'le', idx: J.LE, limb: 'la', parent: J.LS, kind: 'elbow', side: 'l', shoulder: J.LS },
-  { name: 're', idx: J.RE, limb: 'ra', parent: J.RS, kind: 'elbow', side: 'r', shoulder: J.RS },
-  { name: 'lf', idx: J.LA, limb: 'll', kind: 'foot', other: 'rf' },
-  { name: 'rf', idx: J.RA, limb: 'rl', kind: 'foot', other: 'lf' },
+const I = { NOSE: 0, LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16, LH: 23, RH: 24 };
+const USED = [I.NOSE, I.LS, I.RS, I.LE, I.RE, I.LW, I.RW, I.LH, I.RH];
+const ARMS = [
+  { key: 'l', s: I.LS, e: I.LE, w: I.LW },
+  { key: 'r', s: I.RS, e: I.RE, w: I.RW },
 ];
 
 export const DEFAULTS = {
-  speedThreshold: 3.5,
-  confirmFrames: 3,
-  minGapMs: 200,
-  lookaheadS: 0.08,
-  highZone: 0.3,
-  lowZone: 1.0,
   acquireShoulderVis: 0.7,
   acquireHeadVis: 0.7,
   acquireArmVis: 0.5,
@@ -28,296 +23,295 @@ export const DEFAULTS = {
   keepArmVis: 0.3,
   minJointVis: 0.5,
   minShoulderWidth: 0.05,
-  armMs: 250,
+  armMs: 400,
   lockGraceMs: 400,
-  velocityWindowMs: 45,
-  glitchSpeed: 40,
-  maxLimbRatio: 1.6,
-  switchJump: 1.2,
-  selfMotionFactor: 1.6,
-  legSpeedFactor: 1.6,
-  kickLift: 0.4,
+  stillSpeed: 1.5,
+  walkSpeed: 3.0,
+  walkMs: 200,
+  approachRate: 0.35,
+  elbowUpY: 0.3,
+  wristHighY: 0.6,
   selfTouchDist: 0.5,
-  selfTouchDepth: 0.15,
-  latchQuietMs: 120,
+  selfTouchDepth: -0.5,
+  straightCenter: 0.6,
+  highY: 0.5,
+  extElbow: 125,
+  extReach: 1.05,
+  extLateral: 1.1,
+  minSpeed: 3.5,
+  minDepthSpeed: 4.0,
+  velocityWindowMs: 66,
+  confirmMs: 40,
+  rearmMs: 150,
+  otherArmGapMs: 250,
+  overheadMargin: 0.05,
+  sweepSpeed: 8.0,
+  sweepRatio: 1.3,
+  gapToleranceMs: 34,
+  straightSpeed: 6.0,
 };
 
-export const CUE_IDS = ['duck', 'left', 'right', 'back', 'jump'];
+export const CUE_IDS = ['duck', 'back'];
+
+const median3 = (a, b, c) => Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+
+function angleDeg(a, b, c) {
+  const ux = a.x - b.x, uy = a.y - b.y, uz = a.z - b.z;
+  const vx = c.x - b.x, vy = c.y - b.y, vz = c.z - b.z;
+  const n = Math.hypot(ux, uy, uz) * Math.hypot(vx, vy, vz);
+  if (!n) return 0;
+  return (Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy + uz * vz) / n))) * 180) / Math.PI;
+}
 
 export function createDetector(overrides = {}) {
   const cfg = { ...DEFAULTS, ...overrides };
-  const hist = [];
-  let scaleEma = null;
-  let worldScaleEma = null;
+  let raw = [];
+  let hist = [];
+  let scale = null;
+  let worldScale = null;
   let roll = 0;
-  let pending = null;
-  let lastFireT = -Infinity;
-  let armStart = null;
   let locked = false;
+  let armStart = null;
   let lastValidT = -Infinity;
-  let lastMid = null;
-  const latch = {};
+  let lastFireT = -Infinity;
+  let walkSince = null;
+  let lastFrameT = null;
+  let frameMs = 16.7;
+  const arm = {};
+
+  function freshArms() {
+    walkSince = null;
+    for (const a of ARMS) arm[a.key] = { since: null, frames: 0, lastThreatT: -Infinity, fired: false, calmSince: null, firedT: -Infinity };
+  }
+  freshArms();
 
   function reset() {
-    const wasLocked = locked;
-    hist.length = 0;
-    pending = null;
-    armStart = null;
-    scaleEma = null;
-    worldScaleEma = null;
+    const was = locked;
+    raw = [];
+    hist = [];
+    scale = null;
+    worldScale = null;
     roll = 0;
     locked = false;
-    lastMid = null;
-    for (const k of Object.keys(latch)) delete latch[k];
-    return wasLocked;
+    armStart = null;
+    freshArms();
+    return was;
   }
 
-  // Brief tracking dropouts (blur, sideways turn, head leaving frame) keep the lock;
-  // only a dropout longer than lockGraceMs forces a full re-acquire.
   function dropout(t, status) {
-    hist.length = 0;
-    pending = null;
+    raw = [];
+    hist = [];
+    for (const a of ARMS) arm[a.key].since = null;
     if (locked && t - lastValidT <= cfg.lockGraceMs) return { cue: null, status: 'holding', locked: true };
     const lostLock = reset();
     return { cue: null, status, locked: false, lostLock };
   }
 
-  function noPose(t) {
-    return dropout(t, 'no-person');
+  const noPose = (t) => dropout(t, 'no-person');
+
+  // 3-frame median per coordinate: kills one-frame tracker flicker for ~1 frame of delay.
+  // Below ~40fps three frames span too long a strike, so the 2-frame confirm handles flicker instead.
+  function smooth(lm, world) {
+    raw.push({ lm, world });
+    if (raw.length > 3) raw.shift();
+    if (raw.length < 3 || frameMs > 25) return { lm, world };
+    const [a, b, c] = raw;
+    const out = { lm: [], world: world ? [] : null };
+    for (const i of USED) {
+      const pa = a.lm[i], pb = b.lm[i], pc = c.lm[i];
+      out.lm[i] = {
+        x: median3(pa.x, pb.x, pc.x),
+        y: median3(pa.y, pb.y, pc.y),
+        visibility: median3(pa.visibility ?? 1, pb.visibility ?? 1, pc.visibility ?? 1),
+      };
+      if (world && a.world && b.world && c.world) {
+        const wa = a.world[i], wb = b.world[i], wc = c.world[i];
+        out.world[i] = { x: median3(wa.x, wb.x, wc.x), y: median3(wa.y, wb.y, wc.y), z: median3(wa.z, wb.z, wc.z) };
+      } else if (out.world) {
+        out.world = null;
+      }
+    }
+    return out;
   }
 
-  function toBody(p, mx, my, scale) {
-    const rx = p.x - mx;
-    const ry = p.y - my;
-    const c = Math.cos(-roll);
-    const s = Math.sin(-roll);
-    return { x: (rx * c - ry * s) / scale, y: (rx * s + ry * c) / scale };
-  }
-
-  function frame(lm, world, t, aspect = 1, selfMotion = false) {
-    const pt = (i) => ({ x: lm[i].x * aspect, y: lm[i].y, v: lm[i].visibility ?? 1 });
-    const ls = pt(J.LS);
-    const rs = pt(J.RS);
-    const nose = pt(J.NOSE);
-    const armVis = [J.LE, J.RE, J.LW, J.RW].reduce((s, i) => s + (lm[i].visibility ?? 1), 0) / 4;
-
-    // Acquiring needs a clearly real person (face, both shoulders, arms); phantom poses on
-    // clutter fail this. Once locked, a sideways stance or his head leaving frame is tolerated.
+  function frame(lmIn, worldIn, t, aspect = 1, selfMotion = false) {
+    if (lastFrameT !== null && t > lastFrameT) frameMs = frameMs * 0.8 + Math.min(100, t - lastFrameT) * 0.2;
+    lastFrameT = t;
+    const vis = (i) => lmIn[i].visibility ?? 1;
+    const armVis = (vis(I.LE) + vis(I.RE) + vis(I.LW) + vis(I.RW)) / 4;
     if (!locked) {
-      if (ls.v < cfg.acquireShoulderVis || rs.v < cfg.acquireShoulderVis) return dropout(t, 'no-person');
-      if (nose.v < cfg.acquireHeadVis) return dropout(t, 'no-head');
+      if (vis(I.LS) < cfg.acquireShoulderVis || vis(I.RS) < cfg.acquireShoulderVis) return dropout(t, 'no-person');
+      if (vis(I.NOSE) < cfg.acquireHeadVis) return dropout(t, 'no-head');
       if (armVis < cfg.acquireArmVis) return dropout(t, 'no-arms');
     } else {
-      if ((ls.v + rs.v) / 2 < cfg.keepShoulderVis) return dropout(t, 'no-person');
+      if ((vis(I.LS) + vis(I.RS)) / 2 < cfg.keepShoulderVis) return dropout(t, 'no-person');
       if (armVis < cfg.keepArmVis) return dropout(t, 'no-arms');
     }
 
+    const { lm, world } = smooth(lmIn, worldIn);
+    const P = (i) => ({ x: lm[i].x * aspect, y: lm[i].y, v: lm[i].visibility ?? 1 });
+    const ls = P(I.LS);
+    const rs = P(I.RS);
     const [a, b] = ls.x <= rs.x ? [ls, rs] : [rs, ls];
     const sRaw = Math.hypot(b.x - a.x, b.y - a.y);
     if (!locked && sRaw < cfg.minShoulderWidth) return dropout(t, 'too-small');
+
+    // Only learn scale/roll while he faces the camera; turning sideways shrinks the shoulder line.
+    if (scale === null) {
+      scale = sRaw;
+      roll = Math.atan2(b.y - a.y, b.x - a.x);
+    } else if (sRaw > 0.75 * scale) {
+      scale = scale * 0.9 + sRaw * 0.1;
+      roll = Math.atan2(b.y - a.y, b.x - a.x);
+    }
     const mx = (ls.x + rs.x) / 2;
     const my = (ls.y + rs.y) / 2;
+    const c = Math.cos(-roll);
+    const s = Math.sin(-roll);
+    const body = (p) => {
+      const rx = p.x - mx;
+      const ry = p.y - my;
+      return { x: (rx * c - ry * s) / scale, y: (rx * s + ry * c) / scale };
+    };
 
-    if (locked && lastMid && !selfMotion && t - lastValidT < 100
-        && Math.hypot(mx - lastMid.x, my - lastMid.y) > cfg.switchJump * scaleEma) {
-      const lostLock = reset();
-      return { cue: null, status: 'switched', locked: false, lostLock };
-    }
+    const noseY = body(P(I.NOSE)).y;
+    if (!locked && noseY > -0.15) return dropout(t, 'no-head');
+    const hipsOk = lm[I.LH].visibility >= 0.5 && lm[I.RH].visibility >= 0.5;
+    const anchor = hipsOk
+      ? { x: (lm[I.LH].x + lm[I.RH].x) / 2 * aspect, y: (lm[I.LH].y + lm[I.RH].y) / 2 }
+      : { x: mx, y: my };
 
-    if (scaleEma === null) {
-      scaleEma = sRaw;
-      roll = Math.atan2(b.y - a.y, b.x - a.x);
-    } else if (sRaw > 0.6 * scaleEma) {
-      scaleEma = scaleEma * 0.9 + sRaw * 0.1;
-      roll = Math.atan2(b.y - a.y, b.x - a.x);
-    }
-
-    const noseBody = toBody(nose, mx, my, scaleEma);
-    if (!locked && noseBody.y > -0.15) return dropout(t, 'no-head');
-
-    let wShoulderZ = null;
     if (world) {
-      const wl = world[J.LS];
-      const wr = world[J.RS];
-      const ws = Math.hypot(wl.x - wr.x, wl.y - wr.y, wl.z - wr.z);
-      if (ws > 0.05) worldScaleEma = worldScaleEma === null ? ws : worldScaleEma * 0.9 + ws * 0.1;
-      wShoulderZ = (wl.z + wr.z) / 2;
+      const ws = Math.hypot(world[I.LS].x - world[I.RS].x, world[I.LS].y - world[I.RS].y, world[I.LS].z - world[I.RS].z);
+      if (ws > 0.05) worldScale = worldScale === null ? ws : worldScale * 0.9 + ws * 0.1;
     }
+    const shoulderZ = world ? (world[I.LS].z + world[I.RS].z) / 2 : null;
 
-    const bodyOf = (i) => toBody(pt(i), mx, my, scaleEma);
-    const shoulders = { l: bodyOf(J.LS), r: bodyOf(J.RS) };
-    const hipVis = Math.min(lm[J.LH].visibility ?? 1, lm[J.RH].visibility ?? 1);
-    const hipY = hipVis >= 0.5 ? (bodyOf(J.LH).y + bodyOf(J.RH).y) / 2 : 1.3;
-
-    const joints = {};
-    for (const d of JOINTS) {
-      const body = bodyOf(d.idx);
-      let vis = lm[d.idx].visibility ?? 1;
-      // A wrist detached from its own elbow is usually the wearer's hand grafted onto his skeleton.
-      if (d.parent !== undefined) {
-        const p = bodyOf(d.parent);
-        if (Math.hypot(body.x - p.x, body.y - p.y) > cfg.maxLimbRatio) vis = 0;
-      }
-      const depth = world && wShoulderZ !== null ? world[d.idx].z - wShoulderZ : null;
+    const arms = {};
+    for (const d of ARMS) {
+      const w = body(P(d.w));
+      const elbowY = body(P(d.e)).y;
+      const ok = lm[d.w].visibility >= cfg.minJointVis && lm[d.e].visibility >= cfg.minJointVis;
+      let elbow = null;
       let reach = null;
-      if (world && worldScaleEma && d.shoulder !== undefined) {
-        const w = world[d.idx];
-        const s = world[d.shoulder];
-        reach = Math.hypot(w.x - s.x, w.y - s.y, w.z - s.z) / worldScaleEma;
+      let depth = null;
+      if (world && worldScale) {
+        elbow = angleDeg(world[d.s], world[d.e], world[d.w]);
+        const ws = world[d.s];
+        const ww = world[d.w];
+        reach = Math.hypot(ww.x - ws.x, ww.y - ws.y, ww.z - ws.z) / worldScale;
+        depth = (ww.z - shoulderZ) / worldScale;
       }
-      joints[d.name] = { ...body, vis, depth, reach };
+      arms[d.key] = { x: w.x, y: w.y, elbowY, ok, elbow, reach, depth };
     }
 
-    hist.push({ t, joints });
-    while (hist.length > 2 && t - hist[0].t > 250) hist.shift();
+    // Body speed from the hips: shoulders rotate with every big punch, hips only move when he walks.
+    hist.push({ t, mx: anchor.x / scale, my: anchor.y / scale, size: sRaw, arms });
+    while (hist.length > 2 && t - hist[0].t > 400) hist.shift();
+    lastValidT = t;
 
-    let gainedLock = false;
-    if (!locked) {
-      if (armStart === null) armStart = t;
-      if (t - armStart < cfg.armMs) {
-        lastValidT = t;
-        lastMid = { x: mx, y: my };
-        return { cue: null, status: 'locking-on', locked: false };
-      }
-      locked = true;
-      gainedLock = true;
-    }
-
-    const now = hist[hist.length - 1];
     let then = null;
     for (let i = hist.length - 2; i >= 0; i--) {
-      if (now.t - hist[i].t >= cfg.velocityWindowMs) {
+      if (t - hist[i].t >= cfg.velocityWindowMs) {
         then = hist[i];
         break;
       }
     }
-    if (!then) {
-      lastValidT = t;
-      lastMid = { x: mx, y: my };
-      return { cue: null, status: 'warming-up', locked: true, gainedLock };
+    const dt = then ? (t - then.t) / 1000 : 0;
+    const bodySpeed = then ? Math.hypot(hist[hist.length - 1].mx - then.mx, hist[hist.length - 1].my - then.my) / dt : 0;
+
+    // Lock only once he is roughly still, so walking into place never arms the detector.
+    let gainedLock = false;
+    if (!locked) {
+      if (!then || bodySpeed > cfg.stillSpeed) armStart = null;
+      else if (armStart === null) armStart = t;
+      if (armStart === null || t - armStart < cfg.armMs) return { cue: null, status: 'locking-on', locked: false };
+      locked = true;
+      gainedLock = true;
     }
-    const first = hist[0];
-    const dt = (now.t - then.t) / 1000;
+    if (!then) return { cue: null, status: 'warming-up', locked: true, gainedLock };
 
-    const motion = {};
-    for (const d of JOINTS) {
-      const j = now.joints[d.name];
-      const jp = then.joints[d.name];
-      if (j.vis < cfg.minJointVis || jp.vis < cfg.minJointVis) continue;
-      const vx = (j.x - jp.x) / dt;
-      const vy = (j.y - jp.y) / dt;
-      const s2 = Math.hypot(vx, vy);
-      let sz = 0;
-      if (j.depth !== null && jp.depth !== null && worldScaleEma) {
-        sz = -((j.depth - jp.depth) / dt) / worldScaleEma;
-      }
-      const mag = Math.max(s2, sz);
-      if (mag > cfg.glitchSpeed) return dropout(t, 'tracking-jump');
-      motion[d.name] = { d, j, vx, vy, s2, sz, mag };
-    }
-
-    lastValidT = t;
-    lastMid = { x: mx, y: my };
-
-    const thr = cfg.speedThreshold * (selfMotion ? cfg.selfMotionFactor : 1);
-
-    // A limb that just fired stays latched until it has been quiet for latchQuietMs, so one
-    // swing gives one cue, while the other hand (a combo) can fire right away.
-    const limbSpeed = {};
-    for (const m of Object.values(motion)) limbSpeed[m.d.limb] = Math.max(limbSpeed[m.d.limb] ?? 0, m.mag);
-    for (const limb of Object.keys(latch)) {
-      if ((limbSpeed[limb] ?? 0) < 0.5 * thr) {
-        latch[limb].quietSince ??= t;
-        if (t - latch[limb].quietSince >= cfg.latchQuietMs) delete latch[limb];
-      } else {
-        latch[limb].quietSince = null;
-      }
-    }
-
+    // Walking = hips moving sideways, or him growing in frame (walking at the camera), for walkMs.
+    // A lunge into a punch is shorter and doesn't count.
+    const approach = then ? (sRaw / then.size - 1) / dt : 0;
+    if (bodySpeed > cfg.walkSpeed || approach > cfg.approachRate) walkSince ??= t;
+    else walkSince = null;
+    const walking = walkSince !== null && t - walkSince >= cfg.walkMs;
+    const speedNeed = cfg.minSpeed * (selfMotion ? 1.6 : 1);
     let best = null;
-    for (const m of Object.values(motion)) {
-      const { d, j } = m;
-      if (latch[d.limb]) continue;
-      let need = thr;
+    let debug = null;
 
-      if (d.kind === 'foot') {
-        const o = now.joints[d.other];
-        if (o.vis < cfg.minJointVis || o.y - j.y < cfg.kickLift) continue;
-        need *= cfg.legSpeedFactor;
-      } else {
-        // Pulling the hand back toward his own shoulder is a retraction, never a strike.
-        // Judged in 3D: in the flat image a hook's sweep also passes back over his shoulder.
-        const jp = then.joints[d.name];
-        if (j.reach !== null && jp.reach !== null) {
-          if ((j.reach - jp.reach) / dt < -0.4 * m.mag) continue;
-        } else {
-          const sh = shoulders[d.side];
-          const rx = jp.x - sh.x;
-          const ry = jp.y - sh.y;
-          const r = Math.hypot(rx, ry);
-          if (r > 0.35 && (rx * m.vx + ry * m.vy) / r < -0.5 * m.s2 && m.sz <= 0.5) continue;
+    for (const d of ARMS) {
+      const now = arms[d.key];
+      const prev = then.arms[d.key];
+      const st = arm[d.key];
+      if (!now.ok || !prev.ok) {
+        st.since = null;
+        continue;
+      }
+      const vx = (now.x - prev.x) / dt;
+      const vy = (now.y - prev.y) / dt;
+      const speed = Math.hypot(vx, vy);
+      const towardCam = now.depth !== null && prev.depth !== null ? -(now.depth - prev.depth) / dt : 0;
+
+      const elbowUp = now.elbowY < cfg.elbowUpY;
+      // Overhand: fist above his own nose. A guard sits at the chin, never above the nose.
+      const overhead = now.y < noseY - cfg.overheadMargin;
+      const wristHigh = now.y < cfg.wristHighY;
+      // Straight punch: arm snapping open straight down his centre line toward the camera.
+      const straight = now.elbow !== null && prev.elbow !== null
+        && now.elbow > cfg.extElbow && now.elbow - prev.elbow > 20
+        && towardCam >= cfg.straightSpeed && towardCam > 2 * speed
+        && Math.abs(now.x) < cfg.straightCenter && now.y > -0.6 && now.y < 0.6;
+      // Touching his own head lifts the elbow too, but the hand stops at his head, level with his
+      // body, instead of going out wide or coming forward at the camera.
+      const selfTouch = !straight && now.depth !== null && now.depth > cfg.selfTouchDepth && towardCam < 3
+        && Math.hypot(now.x, now.y - noseY) < cfg.selfTouchDist;
+      const strikePose = ((elbowUp && wristHigh) || overhead) && !selfTouch;
+      const moving = speed >= speedNeed || towardCam >= cfg.minDepthSpeed * (selfMotion ? 1.6 : 1);
+      const threat = !walking && ((strikePose && moving) || straight);
+
+      const info = { arm: d.key, x: +now.x.toFixed(2), y: +now.y.toFixed(2), ey: +now.elbowY.toFixed(2), nose: +noseY.toFixed(2), why: [elbowUp && 'elbow', overhead && 'over', straight && 'straight'].filter(Boolean).join('+'), speed: +speed.toFixed(1), toward: +towardCam.toFixed(1), elbow: now.elbow === null ? null : Math.round(now.elbow), reach: now.reach === null ? null : +now.reach.toFixed(2) };
+      if (!debug || speed > debug.speed) debug = info;
+
+      // After firing, an arm re-arms only once it has been out of the strike pose for rearmMs.
+      if (st.fired) {
+        if (strikePose) st.calmSince = null;
+        else if (st.calmSince === null) st.calmSince = t;
+        if (st.calmSince !== null && t - st.calmSince >= cfg.rearmMs) {
+          st.fired = false;
+          st.calmSince = null;
         }
-        if (d.kind === 'wrist' && j.depth !== null
-            && Math.hypot(j.x - noseBody.x, j.y - noseBody.y) < cfg.selfTouchDist
-            && j.depth > -cfg.selfTouchDepth) continue;
       }
 
-      if (m.mag < need) continue;
-      const score = m.mag / need;
-      if (!best || score > best.score) best = { ...m, score, startX: first.joints[d.name].x };
+      if (!threat) {
+        if (t - st.lastThreatT > Math.max(cfg.gapToleranceMs, frameMs * 1.5)) {
+          st.since = null;
+          st.frames = 0;
+        }
+        continue;
+      }
+      st.lastThreatT = t;
+      if (st.since === null) st.since = t;
+      st.frames++;
+      // Held long enough: the span covered by these frames (incl. this one) and at least 2 frames.
+      if (st.fired || st.frames < 2 || t - st.since + frameMs < cfg.confirmMs + 10) continue;
+
+      const cue = straight && !overhead ? 'back' : 'duck';
+      if (!best || speed > best.speed) best = { cue, side: d.key, speed, info };
     }
 
-    const top = Object.values(motion).sort((p, q) => q.mag - p.mag)[0];
-    const debug = top
-      ? { joint: top.d.name, speed: +top.mag.toFixed(2), s2: +top.s2.toFixed(2), sz: +top.sz.toFixed(2), y: +top.j.y.toFixed(2) }
-      : null;
+    if (!best) return { cue: null, status: walking ? 'walking' : selfMotion ? 'self-motion' : 'calm', debug, locked: true, gainedLock };
+    const otherFiredRecently = ARMS.some((d) => d.key !== best.side && t - arm[d.key].firedT < cfg.otherArmGapMs);
+    if (otherFiredRecently || t - lastFireT < 120) return { cue: null, status: 'gap', debug, locked: true, gainedLock };
 
-    if (!best) {
-      pending = null;
-      return { cue: null, status: selfMotion ? 'self-motion' : 'calm', debug, locked: true, gainedLock };
-    }
-
-    const cue = best.d.kind === 'foot' ? classifyKick(best, cfg, hipY) : classify(best, cfg);
-    if (debug) debug.zone = cue;
-    if (!cue) {
-      pending = null;
-      return { cue: null, status: 'undecided', debug, locked: true, gainedLock };
-    }
-
-    // Confirm on the limb, not the zone: a rising foot or sweeping fist crosses zones mid-strike.
-    if (pending && pending.key === best.d.limb) pending.count += 1;
-    else pending = { key: best.d.limb, count: 1 };
-
-    if (pending.count < cfg.confirmFrames) return { cue: null, status: 'confirming', debug, locked: true, gainedLock };
-    if (t - lastFireT < cfg.minGapMs) return { cue: null, status: 'gap', debug, locked: true, gainedLock };
-
+    const st = arm[best.side];
+    st.fired = true;
+    st.firedT = t;
+    st.calmSince = null;
     lastFireT = t;
-    pending = null;
-    latch[best.d.limb] = { quietSince: null };
-    return { cue, status: 'fired', debug, locked: true, gainedLock, limb: best.d.limb };
+    return { cue: best.cue, side: best.side, status: 'fired', debug: best.info, locked: true, gainedLock };
   }
 
   return { frame, noPose, reset, cfg, isLocked: () => locked };
-}
-
-function classify(m, cfg) {
-  if (m.sz > cfg.speedThreshold * 0.8 && m.sz >= m.s2 * 0.9) return 'back';
-
-  const down = m.vy > 0.6 * m.s2;
-  const up = m.vy < -0.6 * m.s2;
-  const predY = m.j.y + m.vy * cfg.lookaheadS;
-
-  // A hand dropping from guard could become a mid or a low swing; wait until it commits.
-  if (down) return predY > cfg.lowZone && m.j.y > cfg.lowZone * 0.5 ? 'jump' : null;
-  if (up || m.j.y < cfg.highZone) return 'duck';
-  if (m.j.y > cfg.lowZone) return 'jump';
-
-  return m.startX < 0 ? 'right' : 'left';
-}
-
-function classifyKick(m, cfg, hipY) {
-  const y = Math.min(m.j.y, m.j.y + m.vy * cfg.lookaheadS * 1.25);
-  if (y < cfg.highZone) return 'duck';
-  if (y < hipY) return 'back';
-  return 'jump';
 }

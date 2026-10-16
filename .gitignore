@@ -4,3 +4,6 @@ node_modules/
 .vercel
 dist/
 *.log
+
+# personal test footage and extracted landmarks
+tests/fixtures/

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Landmark extractor</title>
+  <script type="importmap">
+  { "imports": { "mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs" } }
+  </script>
+</head>
+<body>
+  <video id="v" muted playsinline></video>
+  <pre id="out">starting</pre>
+  <script type="module">
+    import { PoseLandmarker, FilesetResolver } from 'mediapipe/tasks-vision';
+
+    const q = new URLSearchParams(location.search);
+    const src = q.get('video');
+    const start = Number(q.get('start') ?? 0);
+    const end = Number(q.get('end') ?? Infinity);
+    const fps = Number(q.get('fps') ?? 60);
+    const model = q.get('model') ?? 'full';
+    const MODELS = {
+      lite: '../frontend/models/pose_landmarker_lite.task',
+      full: '../tests/fixtures/pose_landmarker_full.task',
+    };
+    const out = document.getElementById('out');
+    const v = document.getElementById('v');
+
+    const round = (n) => Math.round(n * 10000) / 10000;
+    const pack = (lms) => lms.map((p) => [round(p.x), round(p.y), round(p.z), round(p.visibility ?? 0)]);
+
+    try {
+      const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+      const lm = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODELS[model], delegate: 'CPU' },
+        runningMode: 'VIDEO',
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      // Load as a blob: simple static servers don't support range requests, which breaks seeking.
+      v.src = URL.createObjectURL(await (await fetch(src)).blob());
+      await new Promise((r) => { v.onloadedmetadata = r; });
+      const stop = Math.min(end, v.duration);
+      const canvas = document.createElement('canvas');
+      canvas.width = v.videoWidth;
+      canvas.height = v.videoHeight;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const frames = [];
+      for (let t = start; t < stop; t += 1 / fps) {
+        v.currentTime = t;
+        await new Promise((r) => { v.onseeked = r; });
+        ctx.drawImage(v, 0, 0);
+        const res = lm.detectForVideo(ctx.getImageData(0, 0, canvas.width, canvas.height), Math.round(t * 1000));
+        frames.push({
+          t: Math.round(t * 1000),
+          lm: res.landmarks?.[0] ? pack(res.landmarks[0]) : null,
+          wl: res.worldLandmarks?.[0] ? pack(res.worldLandmarks[0]) : null,
+        });
+        if (frames.length % 60 === 0) out.textContent = `t=${t.toFixed(2)}`;
+      }
+      window.__result = { width: v.videoWidth, height: v.videoHeight, fps, model, frames };
+      out.textContent = 'done';
+    } catch (err) {
+      window.__error = String(err?.stack ?? err);
+      out.textContent = window.__error;
+    }
+  </script>
+</body>
+</html>
