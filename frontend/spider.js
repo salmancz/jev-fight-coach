@@ -78,18 +78,7 @@ let recordStart = 0;
 let recordCues = [];
 let recordPrompts = [];
 let promptTimer = null;
-const PROMPTS = [
-  { id: 'jab', say: 'Jab' },
-  { id: 'cross', say: 'Cross' },
-  { id: 'lead-hook', say: 'Left hook' },
-  { id: 'rear-hook', say: 'Right hook' },
-  { id: 'overhand', say: 'Overhand' },
-  { id: 'guard', say: 'Guard up' },
-  { id: 'scratch-head', say: 'Scratch your head' },
-  { id: 'wave', say: 'Wave' },
-  { id: 'step', say: 'Step around' },
-  { id: 'still', say: 'Stand still' },
-];
+const PROMPTS = ['jab', 'cross', 'lead-hook', 'rear-hook', 'overhand', 'guard', 'scratch-head', 'wave', 'step', 'still'];
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./spider-sw.js').catch((err) => console.warn('[sw]', err));
@@ -418,8 +407,9 @@ function updateWarnings() {
   if (warmedUp && !gyroAlive()) warn.push('Motion sensor off: your own ducking is not filtered. Settings > Apps > Safari > Clear History and Website Data, reopen, tap Allow.');
   if (warmedUp && wobble.length > 30 && wobble.filter((s) => s.moving).length / wobble.length > 0.6) warn.push('The phone keeps moving. Tighten the mount (chest is steadier than head).');
 
+  if (!soundOk()) warn.push(`Sound is OFF (${audio ? audio.state : 'not started'}). Tap anywhere on the screen to turn it back on.`);
   const delay = audioDelayMs();
-  el.audioLat.textContent = delay === null ? '-' : `${delay} ms`;
+  el.audioLat.textContent = soundOk() ? (delay === null ? 'on' : `on, ${delay} ms`) : 'OFF';
   if (delay !== null && delay > 100) warn.push(`Audio delay ${delay} ms: looks like Bluetooth. Use wired earphones.`);
 
   el.warnings.replaceChildren(...warn.map((text) => {
@@ -430,6 +420,8 @@ function updateWarnings() {
 }
 
 // ── Audio ────────────────────────────────────────────────────────────────────
+
+let keepAlive = null;
 
 function unlockAudio() {
   if (navigator.audioSession) {
@@ -445,10 +437,50 @@ function unlockAudio() {
   blip.buffer = audio.createBuffer(1, 1, audio.sampleRate);
   blip.connect(audio.destination);
   blip.start();
+
+  // A looping silent <audio> element puts iOS into media playback, so cues are audible even
+  // with the ringer switch on silent and the audio session doesn't go to sleep between cues.
+  if (!keepAlive) {
+    keepAlive = new Audio(silentWavUrl());
+    keepAlive.loop = true;
+    keepAlive.setAttribute('playsinline', '');
+  }
+  keepAlive.play().catch(() => {});
 }
 
-async function loadVoices() {
-  await Promise.all(CUE_IDS.map(async (id) => {
+function silentWavUrl() {
+  const rate = 8000;
+  const samples = rate / 2;
+  const buf = new ArrayBuffer(44 + samples * 2);
+  const v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  str(0, 'RIFF');
+  v.setUint32(4, 36 + samples * 2, true);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  str(36, 'data');
+  v.setUint32(40, samples * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+function soundOk() {
+  return !!audio && audio.state === 'running';
+}
+
+// iOS suspends web audio after calls, notifications or app switches; any tap brings it back.
+document.addEventListener('pointerdown', () => {
+  if (audio && audio.state !== 'running') unlockAudio();
+}, true);
+
+async function loadVoices(ids = CUE_IDS) {
+  await Promise.all(ids.map(async (id) => {
     if (voices[id]) return;
     try {
       const res = await fetch(`./spider-audio/${id}.wav`);
@@ -506,6 +538,16 @@ function playCue(cue, side) {
     src.connect(panner);
     src.start(t + 0.04 + (spec.pulses - 1) * 0.07, v.offset);
   }
+}
+
+function playClip(id) {
+  const v = voices[id];
+  if (!audio || !v) return;
+  if (audio.state !== 'running') audio.resume();
+  const src = audio.createBufferSource();
+  src.buffer = v.buf;
+  src.connect(audio.destination);
+  src.start(audio.currentTime, v.offset);
 }
 
 // Soft sine tones so a blindfolded wearer knows when the app can and can't see him.
@@ -623,7 +665,11 @@ function toggleRecording() {
   recordCues = [];
   recordPrompts = [];
   recordStart = performance.now();
-  if (el.guided.checked) schedulePrompt();
+  if (el.guided.checked) {
+    unlockAudio();
+    loadVoices(PROMPTS.map((p) => `prompt-${p}`));
+    schedulePrompt();
+  }
   recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
   recorder.onstop = () => {
     clearTimeout(promptTimer);
@@ -649,13 +695,9 @@ function toggleRecording() {
 function schedulePrompt() {
   promptTimer = setTimeout(() => {
     if (!recorder) return;
-    const p = PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
-    recordPrompts.push({ t: +((performance.now() - recordStart) / 1000).toFixed(3), move: p.id });
-    if ('speechSynthesis' in window) {
-      const u = new SpeechSynthesisUtterance(p.say);
-      u.rate = 1.1;
-      window.speechSynthesis.speak(u);
-    }
+    const move = PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
+    recordPrompts.push({ t: +((performance.now() - recordStart) / 1000).toFixed(3), move });
+    playClip(`prompt-${move}`);
     schedulePrompt();
   }, 2500 + Math.random() * 1500);
 }
