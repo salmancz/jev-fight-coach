@@ -1,5 +1,6 @@
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from 'mediapipe/tasks-vision';
 import { createDetector, CUE_IDS } from './spider-detector.js';
+import { createLooming, toGray } from './spider-looming.js';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 const MODELS = {
@@ -39,6 +40,7 @@ const el = {
   gyroGate: $('gyro-gate'), gyroGateVal: $('gyro-gate-val'), tests: $('tests'),
   panel: $('panel'), togglePanel: $('toggle-panel'), warnings: $('warnings'),
   checklist: $('checklist'), checklistDone: $('checklist-done'), openChecklist: $('open-checklist'),
+  record: $('record'), recordLinks: $('record-links'), guided: $('guided'),
 };
 
 let landmarker = null;
@@ -65,6 +67,29 @@ const lumaCanvas = document.createElement('canvas');
 lumaCanvas.width = 32;
 lumaCanvas.height = 18;
 const lumaCtx = lumaCanvas.getContext('2d', { willReadFrequently: true });
+const LOOM_W = 64;
+const loomCanvas = document.createElement('canvas');
+const loomCtx = loomCanvas.getContext('2d', { willReadFrequently: true });
+let loom = null;
+let loomGray = null;
+let sidewaysSince = null;
+let recorder = null;
+let recordStart = 0;
+let recordCues = [];
+let recordPrompts = [];
+let promptTimer = null;
+const PROMPTS = [
+  { id: 'jab', say: 'Jab' },
+  { id: 'cross', say: 'Cross' },
+  { id: 'lead-hook', say: 'Left hook' },
+  { id: 'rear-hook', say: 'Right hook' },
+  { id: 'overhand', say: 'Overhand' },
+  { id: 'guard', say: 'Guard up' },
+  { id: 'scratch-head', say: 'Scratch your head' },
+  { id: 'wave', say: 'Wave' },
+  { id: 'step', say: 'Step around' },
+  { id: 'still', say: 'Stand still' },
+];
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./spider-sw.js').catch((err) => console.warn('[sw]', err));
@@ -126,6 +151,7 @@ async function start(motion) {
 }
 
 function stop() {
+  recorder?.stop();
   running = false;
   stream?.getTracks().forEach((t) => t.stop());
   stream = null;
@@ -257,9 +283,22 @@ function onFrame(_now, meta) {
   wobble.push({ t: t0, moving: selfMotion });
   while (wobble.length && t0 - wobble[0].t > 3000) wobble.shift();
 
+  // The pose model breaks on a person lying sideways in the frame, so a rotated phone pauses detection.
+  if (window.innerWidth > window.innerHeight) {
+    if (sidewaysSince === null) {
+      sidewaysSince = t0;
+      if (detector.reset()) playTone('lost');
+      loom?.reset();
+    }
+    setStatus('Phone is sideways: turn it upright (portrait). Paused.', 'warn');
+    return scheduleFrame();
+  }
+  sidewaysSince = null;
+
+  const loomed = sampleLooming(w, h);
   const lm = result.landmarks?.[0];
   const world = result.worldLandmarks?.[0];
-  const r = lm ? detector.frame(lm, world, t0, w / h, selfMotion) : detector.noPose(t0);
+  const r = lm ? detector.frame(lm, world, t0, w / h, selfMotion, loomed) : detector.noPose(t0, loomed, selfMotion);
 
   if (lm && r.locked) {
     drawing.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS, { color: 'rgba(48,209,88,0.6)', lineWidth: 3 });
@@ -270,7 +309,8 @@ function onFrame(_now, meta) {
     lastLostToneT = t0;
     playTone('lost');
   }
-  el.speed.textContent = r.debug ? `${r.debug.speed} (${r.debug.arm === 'l' ? 'his L' : 'his R'}, elbow ${r.debug.ey})` : '-';
+  const poseInfo = r.debug && r.debug.speed !== undefined ? `${r.debug.speed} (${r.debug.arm === 'l' ? 'his L' : 'his R'}, elbow ${r.debug.ey})` : '-';
+  el.speed.textContent = `${poseInfo} | image ${loomed ? Math.round(loomed.frac * 100) : 0}%`;
   if (r.cue) fire(r.cue, r.side, t0, meta?.captureTime, r.debug);
   else showStatus(r.status);
 
@@ -305,8 +345,23 @@ function showStatus(status) {
   setStatus(text, kind);
 }
 
+// Small grayscale copy of the camera frame for the looming channel (fist flying at the lens).
+function sampleLooming(w, h) {
+  const lh = Math.max(16, Math.round((LOOM_W * h) / w));
+  if (loomCanvas.width !== LOOM_W || loomCanvas.height !== lh) {
+    loomCanvas.width = LOOM_W;
+    loomCanvas.height = lh;
+    loom = createLooming(LOOM_W, lh);
+    loomGray = new Uint8Array(LOOM_W * lh);
+  }
+  loomCtx.drawImage(el.video, 0, 0, LOOM_W, lh);
+  toGray(loomCtx.getImageData(0, 0, LOOM_W, lh).data, loomGray);
+  return loom.feed(loomGray);
+}
+
 function fire(cue, side, frameT0, captureTime, debug) {
   playCue(cue, side);
+  if (recorder) recordCues.push({ t: +((performance.now() - recordStart) / 1000).toFixed(3), cue, side, why: debug?.why ?? '' });
   const now = performance.now();
   const sinceCapture = captureTime ? now - captureTime : null;
   const useCapture = sinceCapture !== null && sinceCapture > 0 && sinceCapture < 1000;
@@ -550,6 +605,70 @@ function openChecklist() {
   if (!el.checklist.open) el.checklist.showModal();
 }
 
+// ── Clean test clips ─────────────────────────────────────────────────────────
+
+// Records the raw camera (no overlays) plus every cue with its time, so a test session can be
+// replayed and scored offline (tools/extract-landmarks.mjs + tests/replay.mjs).
+function toggleRecording() {
+  if (recorder) return recorder.stop();
+  if (!stream || !running) return setStatus('Tap Start first, then record', 'warn');
+  const type = ['video/mp4', 'video/webm'].find((m) => window.MediaRecorder?.isTypeSupported?.(m)) ?? '';
+  const chunks = [];
+  try {
+    recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  } catch (err) {
+    recorder = null;
+    return setStatus(`Recording not supported here: ${err.message}`, 'err');
+  }
+  recordCues = [];
+  recordPrompts = [];
+  recordStart = performance.now();
+  if (el.guided.checked) schedulePrompt();
+  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    clearTimeout(promptTimer);
+    const mime = recorder.mimeType || type || 'video/mp4';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const clip = new Blob(chunks, { type: mime });
+    const log = new Blob([JSON.stringify({ cues: recordCues, prompts: recordPrompts, settings, userAgent: navigator.userAgent }, null, 2)], { type: 'application/json' });
+    el.recordLinks.replaceChildren(
+      saveLink(clip, `spider-clip-${stamp}.${mime.includes('mp4') ? 'mp4' : 'webm'}`, 'Save clip'),
+      saveLink(log, `spider-clip-${stamp}.json`, 'Save cue log'),
+    );
+    recorder = null;
+    el.record.textContent = 'Record clean clip';
+    el.record.classList.remove('live');
+  };
+  recorder.start(1000);
+  el.recordLinks.replaceChildren();
+  el.record.textContent = 'Stop recording';
+  el.record.classList.add('live');
+}
+
+// Guided mode labels the clip automatically: the phone calls a move at a random moment and logs when.
+function schedulePrompt() {
+  promptTimer = setTimeout(() => {
+    if (!recorder) return;
+    const p = PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
+    recordPrompts.push({ t: +((performance.now() - recordStart) / 1000).toFixed(3), move: p.id });
+    if ('speechSynthesis' in window) {
+      const u = new SpeechSynthesisUtterance(p.say);
+      u.rate = 1.1;
+      window.speechSynthesis.speak(u);
+    }
+    schedulePrompt();
+  }, 2500 + Math.random() * 1500);
+}
+
+function saveLink(blob, name, label) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.textContent = `${label} (${(blob.size / 1e6).toFixed(1)} MB)`;
+  a.className = 'wide-btn save-link';
+  return a;
+}
+
 // ── Controls ─────────────────────────────────────────────────────────────────
 
 function bindControls() {
@@ -610,6 +729,8 @@ function bindControls() {
     });
     el.tests.appendChild(b);
   }
+
+  el.record.addEventListener('click', toggleRecording);
 
   el.togglePanel.addEventListener('click', () => {
     const open = el.panel.classList.toggle('open');

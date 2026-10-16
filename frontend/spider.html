@@ -112,6 +112,11 @@
     #warnings { list-style: none; margin: 0; padding: 0; flex: 1 1 100%; display: grid; gap: 6px; }
     #warnings li { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); border-radius: 10px; padding: 8px 10px; font-size: 12px; font-weight: 600; }
     .tones-hint { margin-top: 8px; }
+    .guided-row { display: flex; gap: 10px; align-items: center; font-size: 14px; margin-bottom: 8px; }
+    .guided-row input { width: 22px; height: 22px; accent-color: var(--accent); }
+    .record-links { display: grid; gap: 8px; margin-top: 8px; }
+    .save-link { display: grid; place-items: center; text-decoration: none; color: var(--text); }
+    #record.live { background: var(--accent); border-color: var(--accent); }
     .wide-btn { width: 100%; min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: #1c1c1e; font-weight: 700; }
     dialog#checklist { width: min(92vw, 460px); max-height: 88vh; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-solid); color: var(--text); padding: 20px; }
     dialog#checklist::backdrop { background: rgba(0, 0, 0, 0.75); }
@@ -197,13 +202,20 @@
     <h2>Cue log</h2>
     <pre id="log"></pre>
 
+    <h2>Record a test clip</h2>
+    <label class="guided-row"><input id="guided" type="checkbox" checked /> Guided: the phone calls out moves (auto-labels the clip)</label>
+    <button id="record" class="wide-btn" type="button">Record clean clip</button>
+    <div id="record-links" class="record-links"></div>
+    <p class="hint">Records the raw camera without the on-screen text, plus a log of every cue. Send both files: they can be replayed and scored on the laptop to tune detection.</p>
+
     <h2>Safety</h2>
     <button id="open-checklist" class="wide-btn" type="button">Open safety checklist</button>
 
     <h2>What it can't do</h2>
     <ol class="tips">
       <li>It tracks his hand, not what he holds. A noodle's tip can hit high while his hand is low.</li>
-      <li>Tuned on one real session of hooks and overhands. STEP BACK (straight punches) has not been checked on real footage yet.</li>
+      <li>Tuned on two real sessions (24 strikes). Up close, the word (DUCK vs STEP BACK) is wrong about 1 time in 8.</li>
+      <li>Up close it reacts to a big sudden change in the picture, so anything thrown at the camera counts.</li>
       <li>Body shots, low swings and kicks are not detected.</li>
       <li>A feint with the elbow up looks like a real hook and will fire.</li>
       <li>Mirrors and screens showing people can be tracked as a person. Cover them.</li>

@@ -5,6 +5,11 @@
 // kept both elbows low. A strike = elbow up (or fist above his nose) + wrist high + moving, held
 // for confirmMs. Single-frame tracker flicker is removed by a 3-frame median first.
 //
+// Up close (fist flying straight at the lens) the pose model loses the fist, so a second
+// channel, looming (a big sudden change in the camera image, see spider-looming.js), fires
+// instead. It only runs while locked onto a person who is close; the word comes from the
+// skeleton (elbow up = DUCK, otherwise STEP BACK).
+//
 // Positions are in his body frame: origin = shoulder midpoint, unit = shoulder width,
 // y down. So y < 0 is above his shoulder line, |x| > 1 is outside his shoulders.
 
@@ -49,6 +54,13 @@ export const DEFAULTS = {
   sweepRatio: 1.3,
   gapToleranceMs: 34,
   straightSpeed: 6.0,
+  loomFrac: 0.15,
+  loomRefractoryMs: 400,
+  loomFpsExp: 0.5,
+  loomMinShoulder: 0.15,
+  loomLockMs: 800,
+  loomGapMs: 250,
+  poseWordMs: 200,
 };
 
 export const CUE_IDS = ['duck', 'back'];
@@ -77,11 +89,14 @@ export function createDetector(overrides = {}) {
   let walkSince = null;
   let lastFrameT = null;
   let frameMs = 16.7;
+  let lastLockedT = -Infinity;
+  let lastShoulder = 0;
+  const loomState = { frames: 0, latched: false, firedT: -Infinity };
   const arm = {};
 
   function freshArms() {
     walkSince = null;
-    for (const a of ARMS) arm[a.key] = { since: null, frames: 0, lastThreatT: -Infinity, fired: false, calmSince: null, firedT: -Infinity };
+    for (const a of ARMS) arm[a.key] = { since: null, frames: 0, lastThreatT: -Infinity, fired: false, calmSince: null, firedT: -Infinity, lastPoseT: -Infinity };
   }
   freshArms();
 
@@ -102,12 +117,15 @@ export function createDetector(overrides = {}) {
     raw = [];
     hist = [];
     for (const a of ARMS) arm[a.key].since = null;
-    if (locked && t - lastValidT <= cfg.lockGraceMs) return { cue: null, status: 'holding', locked: true };
+    if (locked && t - lastValidT <= cfg.lockGraceMs) {
+      lastLockedT = t;
+      return { cue: null, status: 'holding', locked: true };
+    }
     const lostLock = reset();
     return { cue: null, status, locked: false, lostLock };
   }
 
-  const noPose = (t) => dropout(t, 'no-person');
+  const noPose = (t, loom = null, selfMotion = false) => withLoom(dropout(t, 'no-person'), t, loom, selfMotion);
 
   // 3-frame median per coordinate: kills one-frame tracker flicker for ~1 frame of delay.
   // Below ~40fps three frames span too long a strike, so the 2-frame confirm handles flicker instead.
@@ -134,7 +152,46 @@ export function createDetector(overrides = {}) {
     return out;
   }
 
-  function frame(lmIn, worldIn, t, aspect = 1, selfMotion = false) {
+  function frame(lmIn, worldIn, t, aspect = 1, selfMotion = false, loom = null) {
+    return withLoom(poseFrame(lmIn, worldIn, t, aspect, selfMotion), t, loom, selfMotion);
+  }
+
+  function withLoom(r, t, loom, selfMotion) {
+    if (!loom) return r;
+    const ls = loomState;
+    // One cue per punch: the fist pulling back is as big a change as it coming in, so after a cue
+    // looming stays off for loomRefractoryMs, then needs a fresh rise above the threshold.
+    if (ls.latched && t - ls.firedT >= cfg.loomRefractoryMs && loom.frac < cfg.loomFrac * Math.max(1, frameMs / 16.7)) ls.latched = false;
+    const eligible = t - lastLockedT <= cfg.loomLockMs && lastShoulder >= cfg.loomMinShoulder
+      && !loom.global && r.status !== 'walking';
+    // More of the picture changes between frames at a lower frame rate; scale the bar to match.
+    const loomNeed = cfg.loomFrac * (selfMotion ? 1.6 : 1) * Math.pow(Math.max(1, frameMs / 16.7), cfg.loomFpsExp);
+    if (eligible && loom.frac >= loomNeed) ls.frames++;
+    else ls.frames = 0;
+
+    const out = { ...r, loom: +loom.frac.toFixed(3) };
+    if (r.cue) {
+      ls.latched = true;
+      ls.firedT = t;
+      return out;
+    }
+    if (!eligible || ls.latched || ls.frames < 2 || t - lastFireT < cfg.loomGapMs) return out;
+
+    const posed = ARMS.find((d) => t - arm[d.key].lastPoseT <= cfg.poseWordMs);
+    const side = posed ? posed.key : loom.cx !== null && loom.cx < 0.5 ? 'r' : 'l';
+    ls.latched = true;
+    ls.firedT = t;
+    lastFireT = t;
+    for (const d of ARMS) {
+      if (t - arm[d.key].lastPoseT <= 300) {
+        arm[d.key].fired = true;
+        arm[d.key].firedT = t;
+      }
+    }
+    return { ...out, cue: posed ? 'duck' : 'back', side, status: 'fired', debug: { why: 'looming', frac: out.loom, arm: side } };
+  }
+
+  function poseFrame(lmIn, worldIn, t, aspect, selfMotion) {
     if (lastFrameT !== null && t > lastFrameT) frameMs = frameMs * 0.8 + Math.min(100, t - lastFrameT) * 0.2;
     lastFrameT = t;
     const vis = (i) => lmIn[i].visibility ?? 1;
@@ -155,6 +212,7 @@ export function createDetector(overrides = {}) {
     const [a, b] = ls.x <= rs.x ? [ls, rs] : [rs, ls];
     const sRaw = Math.hypot(b.x - a.x, b.y - a.y);
     if (!locked && sRaw < cfg.minShoulderWidth) return dropout(t, 'too-small');
+    lastShoulder = sRaw;
 
     // Only learn scale/roll while he faces the camera; turning sideways shrinks the shoulder line.
     if (scale === null) {
@@ -229,6 +287,7 @@ export function createDetector(overrides = {}) {
       locked = true;
       gainedLock = true;
     }
+    lastLockedT = t;
     if (!then) return { cue: null, status: 'warming-up', locked: true, gainedLock };
 
     // Walking = hips moving sideways, or him growing in frame (walking at the camera), for walkMs.
@@ -268,6 +327,7 @@ export function createDetector(overrides = {}) {
       const selfTouch = !straight && now.depth !== null && now.depth > cfg.selfTouchDepth && towardCam < 3
         && Math.hypot(now.x, now.y - noseY) < cfg.selfTouchDist;
       const strikePose = ((elbowUp && wristHigh) || overhead) && !selfTouch;
+      if (strikePose) st.lastPoseT = t;
       const moving = speed >= speedNeed || towardCam >= cfg.minDepthSpeed * (selfMotion ? 1.6 : 1);
       const threat = !walking && ((strikePose && moving) || straight);
 
